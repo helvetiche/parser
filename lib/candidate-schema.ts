@@ -19,6 +19,16 @@ export type Candidate = {
 };
 
 export type CandidateRow = Candidate & { id: string };
+
+/** Hard cap for the professional summary, enforced regardless of model output. */
+export const SUMMARY_MAX_WORDS = 50;
+
+/** Clamp text to at most maxWords words, appending an ellipsis when trimmed. */
+function limitWords(text: string, maxWords: number): string {
+  const words = text.split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return text;
+  return words.slice(0, maxWords).join(" ") + "…";
+}
 /**
  * Strictly formats a phone number as 0900 000 0000.
  * Handles +63 / 63 / 9XX prefixes and strips all non-digits first.
@@ -124,7 +134,7 @@ export function candidateFromUnknown(input: unknown): Candidate {
 
   return {
     fullName: toText(map.fullName),
-    summary: toText(map.summary),
+    summary: limitWords(toText(map.summary), SUMMARY_MAX_WORDS),
     education: toText(map.education),
     experience: toList(map.experience, /\r?\n|;/),
     skills: toList(map.skills, /[,;]|\r?\n/),

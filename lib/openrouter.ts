@@ -17,7 +17,11 @@ export class OpenRouterError extends Error {
 }
 
 export type ChatCompletion = {
-  choices?: Array<{ message?: { content?: string } }>;
+  choices?: Array<{
+    message?: { content?: string };
+    /** "length" means the output hit max_tokens and was cut off. */
+    finish_reason?: string;
+  }>;
 };
 
 function sleep(ms: number) {

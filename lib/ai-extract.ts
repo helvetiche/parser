@@ -147,7 +147,25 @@ function repairJson(input: string): string {
   return result;
 }
 
-const RACE_FALLBACKS = ["nvidia/nemotron-nano-9b-v2:free"];
+/**
+ * Models raced in parallel against the primary. Free-tier providers get
+ * overloaded unpredictably, so we ask several at once and take the first
+ * response containing the expected anchor key. Keep this list to models
+ * verified healthy on OpenRouter's free tier.
+ */
+const RACE_FALLBACKS = [
+  "nvidia/nemotron-3-super-120b-a12b:free",
+  "google/gemma-4-31b-it:free",
+  "dots-studio/dots-3-note-preview:free",
+  "poolside/laguna-s-2.1:free",
+];
+
+/** Pause before the second-chance round when every racer fails. */
+const RETRY_ROUND_DELAY_MS = 1500;
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 /**
  * Race the primary model against fallbacks and return the first response
@@ -162,10 +180,19 @@ async function raceStructured(
 
   const attempt = async (m: string): Promise<string> => {
     const opts = { retries: 1, timeoutMs: 45000 };
-    const maxTokens = 2048;
+    // Detailed resumes produce large JSON (long skills/contact arrays);
+    // a tight cap truncates the object mid-stream and makes it unparseable.
+    const maxTokens = 8192;
 
     const finish = (data: ChatCompletion): string => {
-      const content = data.choices?.[0]?.message?.content ?? "";
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content ?? "";
+      if (!content.trim()) {
+        throw new OpenRouterError("Model returned an empty response", 502);
+      }
+      if (choice?.finish_reason === "length") {
+        throw new OpenRouterError("Model output was truncated before completing the JSON", 502);
+      }
       if (!hasAnchorKey(content, anchorKey)) {
         throw new OpenRouterError("Model response contained no structured JSON", 502);
       }
@@ -205,7 +232,8 @@ async function raceStructured(
 
 /**
  * High-level helper: send text to the model fleet, get back a parsed JSON
- * object anchored on `anchorKey`. Throws with readable errors otherwise.
+ * object anchored on `anchorKey`. Runs the race twice (free-tier providers
+ * recover quickly from brief rate limits) before giving up.
  */
 export async function extractStructured(
   userContent: string,
@@ -218,15 +246,24 @@ export async function extractStructured(
     { role: "user", content: userContent },
   ];
 
-  let content: string;
-  try {
-    content = await raceStructured(messages, anchorKey, model);
-  } catch (err) {
-    throw err instanceof Error ? err : new Error("Extraction failed");
+  let content = "";
+  let lastError: unknown;
+
+  for (let round = 0; round < 2 && !content; round++) {
+    if (round > 0) await sleep(RETRY_ROUND_DELAY_MS);
+    try {
+      content = await raceStructured(messages, anchorKey, model);
+    } catch (err) {
+      lastError = err;
+      console.warn(
+        `[ai-extract] race round ${round + 1} failed:`,
+        err instanceof Error ? err.message : err
+      );
+    }
   }
 
   if (!content.trim()) {
-    throw new Error("Model returned an empty response, please try again (providers are busy)");
+    throw lastError instanceof Error ? lastError : new Error("Extraction failed");
   }
 
   const parsed = parseAnchoredObject(content, anchorKey);
