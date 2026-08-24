@@ -1,26 +1,136 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
-
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+  --font-sans: var(--font-geist);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: #f3f4f6;
+  color: #171717;
+}
+
+::selection {
+  background: #d1d5db;
+  color: #111827;
+}
+
+/* Thin gray scrollbars */
+.chat-scroll::-webkit-scrollbar,
+textarea::-webkit-scrollbar {
+  width: 6px;
+}
+.chat-scroll::-webkit-scrollbar-track,
+textarea::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chat-scroll::-webkit-scrollbar-thumb,
+textarea::-webkit-scrollbar-thumb {
+  background: #d4d4d8;
+  border-radius: 9999px;
+}
+.chat-scroll::-webkit-scrollbar-thumb:hover,
+textarea::-webkit-scrollbar-thumb:hover {
+  background: #a1a1aa;
+}
+
+/* Row hover gradient with fade in/out */
+.fade-row {
+  position: relative;
+}
+.fade-row td {
+  position: relative;
+  z-index: 1;
+}
+.fade-row::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 250ms ease-in-out;
+  background: linear-gradient(90deg, #d1d5db 0%, #e5e7eb 20%, #f3f4f6 35%, #ffffff 65%);
+}
+.fade-row:hover::after {
+  opacity: 1;
+}
+
+/* Markdown content */
+.markdown-content > *:first-child {
+  margin-top: 0;
+}
+.markdown-content > *:last-child {
+  margin-bottom: 0;
+}
+.markdown-content p {
+  margin: 0.5rem 0;
+}
+.markdown-content ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+  margin: 0.5rem 0;
+}
+.markdown-content ol {
+  list-style: decimal;
+  padding-left: 1.25rem;
+  margin: 0.5rem 0;
+}
+.markdown-content li {
+  margin: 0.25rem 0;
+}
+.markdown-content h1,
+.markdown-content h2,
+.markdown-content h3,
+.markdown-content h4 {
+  font-weight: 600;
+  color: #111827;
+  margin: 0.75rem 0 0.375rem;
+}
+.markdown-content h1 {
+  font-size: 1.125rem;
+}
+.markdown-content h2 {
+  font-size: 1rem;
+}
+.markdown-content h3,
+.markdown-content h4 {
+  font-size: 0.925rem;
+}
+.markdown-content strong {
+  font-weight: 600;
+  color: #111827;
+}
+.markdown-content a {
+  color: #374151;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.markdown-content code {
+  background: #f4f4f5;
+  border: 1px solid #e4e4e7;
+  border-radius: 6px;
+  padding: 0.125rem 0.375rem;
+  font-size: 85%;
+}
+.markdown-content pre {
+  background: #18181b;
+  color: #f4f4f5;
+  border-radius: 12px;
+  padding: 0.875rem 1rem;
+  overflow-x: auto;
+  margin: 0.75rem 0;
+}
+.markdown-content pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: 100%;
+}
+.markdown-content blockquote {
+  border-left: 3px solid #d4d4d8;
+  padding-left: 0.75rem;
+  margin: 0.5rem 0;
+  color: #52525b;
+  font-style: italic;
 }

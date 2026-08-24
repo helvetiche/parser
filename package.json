@@ -9,9 +9,20 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "firebase": "^12.18.0",
+    "json5": "^2.2.3",
     "next": "16.3.1",
+    "pdf-lib": "^1.17.1",
+    "pdf-parse": "^1.1.1",
+    "pdf2json": "^4.0.3",
+    "pdfjs-dist": "^4.10.38",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "react-feather": "^2.0.10",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "tesseract.js": "^7.0.0"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -20,6 +31,8 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
+    "prettier": "3.9.6",
+    "prettier-plugin-tailwindcss": "0.8.1",
     "tailwindcss": "^4",
     "typescript": "^5"
   }
