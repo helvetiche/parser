@@ -1,6 +1,11 @@
 import { initializeApp, getApps } from "firebase/app";
-import { getAnalytics, isSupported } from "firebase/analytics";
-import { getFirestore } from "firebase/firestore";
+import { getAuth, type Auth } from "firebase/auth";
+
+/**
+ * Browser Firebase client — used for authentication ONLY.
+ * All Firestore data access goes through the server's API routes,
+ * backed by the Admin SDK (see lib/firestore-server.ts).
+ */
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -9,12 +14,7 @@ const firebaseConfig = {
   storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET,
   messagingSenderId: process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID,
   appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID,
-  measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
 };
 
 export const app = getApps().length ? getApps()[0] : initializeApp(firebaseConfig);
-export const db = getFirestore(app);
-export const analytics =
-  typeof window !== "undefined"
-    ? isSupported().then((supported) => (supported ? getAnalytics(app) : null))
-    : null;
+export const auth: Auth = getAuth(app);

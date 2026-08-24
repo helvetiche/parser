@@ -1,8 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extractCandidate, PARSER_MODEL } from "@/lib/extract-candidate";
 import { isReadableText } from "@/lib/text-quality";
+import { requireUser } from "@/lib/auth-server";
 
 export async function POST(req: NextRequest) {
+  const [, denied] = await requireUser(req);
+  if (denied) return denied;
+
   try {
     const { text, model } = await req.json();
 

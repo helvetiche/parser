@@ -1,11 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import useSWR from "swr";
 import {
   Article,
   Briefcase,
   CircleNotch,
   ClipboardText,
+  Cpu,
   DotsThree,
   FileArrowUp,
   Lightning,
@@ -19,9 +21,20 @@ import type { Icon } from "@phosphor-icons/react";
 import Modal, { ModalCloseButton } from "@/components/ui/Modal";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import Dropzone, { DropzoneBusy, DropzoneIdle } from "@/components/ui/Dropzone";
-import { deleteRole, saveRole, subscribeToRoles, type RoleRow } from "@/lib/roles";
-import type { RoleData } from "@/lib/role-schema";
-import { extractRoleFromText, parsePdfFile } from "@/lib/client-api";
+import UploadQueuePanel from "@/components/ui/UploadQueuePanel";
+import Skeleton from "@/components/ui/Skeleton";
+import { useUploadQueue } from "@/hooks/useUploadQueue";
+import type { RoleData, RoleRow } from "@/lib/role-schema";
+import {
+  createRole,
+  deleteRole,
+  extractRoleFromText,
+  parsePdfFile,
+  type RolesResponse,
+} from "@/lib/client-api";
+import { cacheKeys } from "@/lib/cache-keys";
+import { DEFAULT_MODEL } from "@/lib/models";
+import ModelSelect from "@/components/ui/ModelSelect";
 
 type ColumnType = "text" | "list" | "skills" | "description";
 
@@ -42,47 +55,45 @@ const MAX_LIST_ITEMS = 3;
 const MAX_SKILL_PILLS = 4;
 
 export default function RoleDescription() {
-  const [roles, setRoles] = useState<RoleRow[]>([]);
-  const [listLoading, setListLoading] = useState(true);
+  const {
+    data,
+    isLoading: listLoading,
+    error: listError,
+    mutate: mutateRoles,
+  } = useSWR<RolesResponse>(cacheKeys.roles);
+  const roles = data?.roles ?? [];
   const [error, setError] = useState<string | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
-  const [uploading, setUploading] = useState(false);
+  const [parserModel, setParserModel] = useState(DEFAULT_MODEL);
   const [pendingDelete, setPendingDelete] = useState<RoleRow | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
 
-  useEffect(() => {
-    const unsubscribe = subscribeToRoles(
-      (rows) => {
-        setRoles(rows);
-        setListLoading(false);
-      },
-      () => {
-        setError("Failed to load roles from Firestore");
-        setListLoading(false);
-      }
-    );
-    return unsubscribe;
-  }, []);
+  const queue = useUploadQueue({
+    // Parse → extract → persist pipeline for one job-description PDF.
+    runJob: async (file) => {
+      const text = await parsePdfFile(file);
+      const role: RoleData = await extractRoleFromText(text, parserModel);
+      await createRole(role);
+      await mutateRoles();
+    },
+    onAllDone: () => setUploadOpen(false),
+  });
+  const uploading = queue.extracting;
 
-  // Parse → extract → persist pipeline for one job-description PDF.
-  const uploadJobDescription = async (file: File) => {
-    if (file.type !== "application/pdf") {
-      setError("Please upload a PDF file");
+  const handleFiles = (files: File[]) => {
+    const pdfs = files.filter((f) => f.type === "application/pdf");
+    const skipped = files.length - pdfs.length;
+
+    if (pdfs.length === 0) {
+      setError("Only PDF files are supported");
       return;
     }
 
-    setUploading(true);
-    setError(null);
-    try {
-      const text = await parsePdfFile(file);
-      const role: RoleData = await extractRoleFromText(text);
-      await saveRole(role);
-      setUploadOpen(false);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to extract role");
-    } finally {
-      setUploading(false);
-    }
+    setError(
+      skipped > 0 ? `${skipped} non-PDF file${skipped > 1 ? "s were" : " was"} skipped` : null
+    );
+
+    queue.stage(pdfs);
   };
 
   const handleConfirmDelete = async () => {
@@ -91,6 +102,7 @@ export default function RoleDescription() {
     try {
       await deleteRole(pendingDelete.id);
       setPendingDelete(null);
+      await mutateRoles();
     } catch {
       setError("Failed to delete role");
     } finally {
@@ -139,12 +151,16 @@ export default function RoleDescription() {
       {/* Table card */}
       <RolesTable roles={roles} loading={listLoading} onDeleteRequest={setPendingDelete} />
 
-      {error && !uploadOpen && (
-        <p className="mt-4 flex items-start justify-center gap-2 rounded-xl bg-red-50 px-3 py-2.5 text-xs font-medium text-red-600 ring-1 ring-red-100 ring-inset">
-          <WarningCircle size={14} weight="fill" className="mt-0.5 shrink-0" />
-          {error}
-        </p>
-      )}
+      {(() => {
+        const banner = error ?? (listError ? "Failed to load roles" : null);
+        if (!banner || uploadOpen) return null;
+        return (
+          <p className="mt-4 flex items-start justify-center gap-2 rounded-xl bg-red-50 px-3 py-2.5 text-xs font-medium text-red-600 ring-1 ring-red-100 ring-inset">
+            <WarningCircle size={14} weight="fill" className="mt-0.5 shrink-0" />
+            {banner}
+          </p>
+        );
+      })()}
 
       {/* Upload modal */}
       {uploadOpen && (
@@ -162,26 +178,51 @@ export default function RoleDescription() {
                 Upload Job Description
               </h3>
               <p className="mt-1 text-sm text-gray-500">
-                Drop a PDF and AI structures the role details.
+                Drop job description PDFs and AI structures each role.
               </p>
             </div>
             <ModalCloseButton onClose={() => setUploadOpen(false)} disabled={uploading} />
           </div>
 
-          <Dropzone
-            onFiles={(files) => files[0] && void uploadJobDescription(files[0])}
-            busy={uploading}
-          >
+          <Dropzone onFiles={handleFiles} busy={uploading} multiple>
             {uploading ? (
-              <DropzoneBusy message={<>Parsing &amp; extracting…</>} />
+              <DropzoneBusy
+                message={
+                  <>
+                    Processing{" "}
+                    {Math.min(
+                      queue.jobs.filter((j) => j.status !== "staged").length + 1,
+                      queue.jobs.length
+                    )}{" "}
+                    of {queue.jobs.length}…
+                  </>
+                }
+              />
             ) : (
               <DropzoneIdle
                 icon={<FileArrowUp size={24} />}
-                title="Drop job description PDF here"
-                subtitle="or click to browse"
+                title="Drop job description PDFs here"
+                subtitle="or click to browse — bulk uploads supported"
               />
             )}
           </Dropzone>
+
+          <UploadQueuePanel queue={queue} />
+
+          {/* Parser model picker — locked while a batch is running */}
+          <div className="mt-4">
+            <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wider text-gray-500">
+              <Cpu size={13} />
+              Parser model
+            </label>
+            <ModelSelect
+              value={parserModel}
+              onChange={setParserModel}
+              disabled={uploading}
+              ariaLabel="Job description parser model"
+              title="Model used to parse job descriptions"
+            />
+          </div>
 
           {error && (
             <p className="mt-4 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2.5 text-xs leading-relaxed font-medium text-red-600 ring-1 ring-red-100 ring-inset">
@@ -240,14 +281,7 @@ function RolesTable({
         </thead>
         <tbody className="divide-y divide-gray-100">
           {loading ? (
-            <tr>
-              <td colSpan={COLUMNS.length}>
-                <div className="flex items-center justify-center gap-2 px-6 py-16 text-sm text-gray-400">
-                  <CircleNotch size={16} className="animate-spin" />
-                  Loading roles…
-                </div>
-              </td>
-            </tr>
+            <RoleSkeletonRows />
           ) : roles.length === 0 ? (
             <tr>
               <td colSpan={COLUMNS.length}>
@@ -380,4 +414,50 @@ function EmptyState() {
       </div>
     </div>
   );
+}
+
+const SKELETON_ROWS = 3;
+
+function RoleSkeletonRows() {
+  return (
+    <>
+      {Array.from({ length: SKELETON_ROWS }, (_, row) => (
+        <tr key={row}>
+          {COLUMNS.map((col, ci) => (
+            <td
+              key={col.key}
+              className={`${ci === 0 ? "min-w-[220px]" : ""} px-4 py-3.5 align-top ${
+                ci > 0 ? "border-l border-gray-100" : ""
+              }`}
+            >
+              <RoleSkeletonCell type={col.type} />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function RoleSkeletonCell({ type }: { type: ColumnType }) {
+  switch (type) {
+    case "text":
+      return <Skeleton className="h-4 w-36" />;
+    case "skills":
+      return (
+        <div className="flex flex-wrap gap-1.5">
+          <Skeleton className="h-[22px] w-14 rounded-full" />
+          <Skeleton className="h-[22px] w-20 rounded-full" />
+          <Skeleton className="h-[22px] w-16 rounded-full" />
+        </div>
+      );
+    default:
+      return (
+        <div className="space-y-2">
+          <Skeleton className="h-3.5 w-full max-w-[300px]" />
+          <Skeleton className="h-3.5 w-[80%] max-w-[260px]" />
+          <Skeleton className="h-3.5 w-[55%] max-w-[180px]" />
+        </div>
+      );
+  }
 }

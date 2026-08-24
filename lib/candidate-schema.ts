@@ -19,7 +19,6 @@ export type Candidate = {
 };
 
 export type CandidateRow = Candidate & { id: string };
-
 /**
  * Strictly formats a phone number as 0900 000 0000.
  * Handles +63 / 63 / 9XX prefixes and strips all non-digits first.

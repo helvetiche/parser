@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
+import useSWR from "swr";
 import {
   ChatCircleDots,
   ClipboardText,
@@ -14,11 +15,14 @@ import type { Icon } from "@phosphor-icons/react";
 import ChatSidebar from "@/components/chat/ChatSidebar";
 import CandidatesTable from "@/components/candidates/CandidatesTable";
 import UploadResumeModal from "@/components/candidates/UploadResumeModal";
+import AuthGate from "@/components/auth/AuthGate";
+import LogoutButton from "@/components/auth/LogoutButton";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ModelSelect from "@/components/ui/ModelSelect";
 import RoleDescription from "@/components/RoleDescription";
-import { parsePdfFile } from "@/lib/client-api";
-import { deleteCandidate, subscribeToCandidates, type CandidateRow } from "@/lib/candidates";
+import { deleteCandidate, parsePdfFile, type CandidatesResponse } from "@/lib/client-api";
+import type { CandidateRow } from "@/lib/candidate-schema";
+import { cacheKeys } from "@/lib/cache-keys";
 import { DEFAULT_MODEL } from "@/lib/models";
 
 type TabId = "candidates" | "role";
@@ -34,6 +38,14 @@ type AttachedPdf = {
 };
 
 export default function Parser() {
+  return (
+    <AuthGate>
+      <ParserApp />
+    </AuthGate>
+  );
+}
+
+function ParserApp() {
   const [activeTab, setActiveTab] = useState<TabId>("candidates");
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
@@ -45,28 +57,19 @@ export default function Parser() {
   const [isDragging, setIsDragging] = useState(false);
   const dragCounter = useRef(0);
 
-  // Candidates list
-  const [candidates, setCandidates] = useState<CandidateRow[]>([]);
-  const [listLoading, setListLoading] = useState(true);
+  // Candidates list — fetched and cached via SWR
+  const {
+    data,
+    isLoading: listLoading,
+    error: listError,
+    mutate: mutateCandidates,
+  } = useSWR<CandidatesResponse>(cacheKeys.candidates);
+  const candidates = data?.candidates ?? [];
   const [notice, setNotice] = useState<string | null>(null);
   const [uploadOpen, setUploadOpen] = useState(false);
   const [parserModel, setParserModel] = useState(DEFAULT_MODEL);
   const [pendingDelete, setPendingDelete] = useState<CandidateRow | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
-
-  useEffect(() => {
-    const unsubscribe = subscribeToCandidates(
-      (rows) => {
-        setCandidates(rows);
-        setListLoading(false);
-      },
-      () => {
-        setNotice("Failed to load candidates from Firestore");
-        setListLoading(false);
-      }
-    );
-    return unsubscribe;
-  }, []);
 
   const attachPdf = async (file: File | undefined) => {
     if (!file) return;
@@ -92,6 +95,7 @@ export default function Parser() {
     try {
       await deleteCandidate(pendingDelete.id);
       setPendingDelete(null);
+      await mutateCandidates();
     } catch {
       setNotice("Failed to delete candidate");
     } finally {
@@ -140,13 +144,16 @@ export default function Parser() {
               <span className="block text-[11px] font-medium text-gray-400">AI resume parsing</span>
             </div>
           </div>
-          <button
-            onClick={() => setSidebarOpen(true)}
-            className="group flex items-center gap-2 rounded-xl bg-gradient-to-b from-gray-700 to-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98]"
-          >
-            <ChatCircleDots size={17} />
-            Chat
-          </button>
+          <div className="flex items-center gap-3">
+            <LogoutButton />
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="group flex items-center gap-2 rounded-xl bg-gradient-to-b from-gray-700 to-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98]"
+            >
+              <ChatCircleDots size={17} />
+              Chat
+            </button>
+          </div>
         </div>
       </nav>
 
@@ -175,7 +182,7 @@ export default function Parser() {
           <>
             <CandidatesHeader
               count={candidates.length}
-              notice={notice}
+              notice={notice ?? (listError ? "Failed to load candidates" : null)}
               parserModel={parserModel}
               onModelChange={setParserModel}
               onUpload={() => {
@@ -224,7 +231,6 @@ export default function Parser() {
       {/* Upload resume modal */}
       {uploadOpen && (
         <UploadResumeModal
-          open={uploadOpen}
           onClose={() => setUploadOpen(false)}
           model={parserModel}
           notice={notice}

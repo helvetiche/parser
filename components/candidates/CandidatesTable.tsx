@@ -3,7 +3,6 @@
 import {
   Brain,
   Briefcase,
-  CircleNotch,
   Clock,
   DotsThree,
   EnvelopeSimple,
@@ -18,6 +17,7 @@ import {
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import type { Candidate, CandidateRow, ContactType } from "@/lib/candidate-schema";
+import Skeleton from "@/components/ui/Skeleton";
 
 export const CONTACT_ICONS: Record<ContactType, Icon> = {
   phone: Phone,
@@ -209,14 +209,7 @@ export default function CandidatesTable({
         </thead>
         <tbody className="divide-y divide-gray-100">
           {loading ? (
-            <tr>
-              <td colSpan={CANDIDATE_COLUMNS.length}>
-                <div className="flex items-center justify-center gap-2 px-6 py-16 text-sm text-gray-400">
-                  <CircleNotch size={16} className="animate-spin" />
-                  Loading candidates…
-                </div>
-              </td>
-            </tr>
+            <CandidateSkeletonRows />
           ) : candidates.length === 0 ? (
             <tr>
               <td colSpan={CANDIDATE_COLUMNS.length}>
@@ -270,4 +263,78 @@ function EmptyState() {
       </div>
     </div>
   );
+}
+
+const SKELETON_ROWS = 4;
+
+function CandidateSkeletonRows() {
+  return (
+    <>
+      {Array.from({ length: SKELETON_ROWS }, (_, row) => (
+        <tr key={row}>
+          {CANDIDATE_COLUMNS.map((col, ci) => (
+            <td
+              key={col.key}
+              className={`${columnWidthClass(col.key)} px-4 py-3.5 align-top ${
+                ci > 0 ? "border-l border-gray-100" : ""
+              }`}
+            >
+              <SkeletonCell colKey={col.key} />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
+  );
+}
+
+function SkeletonCell({ colKey }: { colKey: ColumnKey }) {
+  switch (colKey) {
+    case "fullName":
+      return (
+        <div className="flex flex-col gap-2.5">
+          <div className="flex items-center gap-3">
+            <Skeleton className="h-10 w-10 rounded-full" />
+            <Skeleton className="h-4 w-32" />
+          </div>
+          <Skeleton className="h-3 w-full max-w-[280px]" />
+          <div className="flex gap-3">
+            <Skeleton className="h-3 w-24 rounded-full" />
+            <Skeleton className="h-3 w-36 rounded-full" />
+          </div>
+        </div>
+      );
+    case "skills":
+      return (
+        <div className="flex max-w-[220px] flex-wrap gap-1.5">
+          <Skeleton className="h-[22px] w-14 rounded-full" />
+          <Skeleton className="h-[22px] w-20 rounded-full" />
+          <Skeleton className="h-[22px] w-16 rounded-full" />
+        </div>
+      );
+    case "experience":
+      return (
+        <ol className="ml-1.5 space-y-3.5 border-l border-gray-200 pl-5">
+          <li className="relative">
+            <Skeleton className="absolute top-0 -left-[27px] h-[22px] w-[22px] rounded-full" />
+            <Skeleton className="h-3.5 w-[85%]" />
+          </li>
+          <li className="relative">
+            <Skeleton className="absolute top-0 -left-[27px] h-[22px] w-[22px] rounded-full" />
+            <Skeleton className="h-3.5 w-[70%]" />
+          </li>
+          <li className="relative">
+            <Skeleton className="absolute top-0 -left-[27px] h-[22px] w-[22px] rounded-full bg-gray-200" />
+            <Skeleton className="h-3.5 w-[78%]" />
+          </li>
+        </ol>
+      );
+    default:
+      return (
+        <div className="space-y-2">
+          <Skeleton className="h-3.5 w-[90%]" />
+          <Skeleton className="h-3.5 w-[65%]" />
+        </div>
+      );
+  }
 }

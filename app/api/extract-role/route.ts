@@ -1,14 +1,21 @@
 import { NextRequest, NextResponse } from "next/server";
 import { extractRole, ROLE_MODEL } from "@/lib/extract-role";
 import { isReadableText } from "@/lib/text-quality";
+import { requireUser } from "@/lib/auth-server";
 
 export async function POST(req: NextRequest) {
+  const [, denied] = await requireUser(req);
+  if (denied) return denied;
+
   try {
-    const { text } = await req.json();
+    const { text, model } = await req.json();
 
     if (!text || typeof text !== "string") {
       return NextResponse.json({ error: "Missing PDF text" }, { status: 400 });
     }
+
+    const selectedModel =
+      typeof model === "string" && model.trim() ? model : ROLE_MODEL;
 
     if (!isReadableText(text)) {
       return NextResponse.json(
@@ -20,7 +27,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const role = await extractRole(text, ROLE_MODEL);
+    const role = await extractRole(text, selectedModel);
     return NextResponse.json({ role });
   } catch (error) {
     return NextResponse.json(
