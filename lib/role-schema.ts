@@ -1,4 +1,5 @@
 import { objectFromUnknown, toList, toText } from "./schema-utils";
+import type { MatchResult } from "./match-schema";
 
 export type RoleData = {
   jobTitle: string;
@@ -8,7 +9,18 @@ export type RoleData = {
   skills: string[];
 };
 
-export type RoleRow = RoleData & { id: string };
+/** A persisted candidate-vs-role evaluation stored on the role document. */
+export type SavedEvaluation = MatchResult & {
+  candidateId: string;
+  candidateName: string;
+  evaluatedAt: string;
+};
+
+export type RoleRow = RoleData & {
+  id: string;
+  /** Stored evaluations keyed by candidate id. */
+  evaluations?: Record<string, SavedEvaluation>;
+};
 
 export function roleFromUnknown(input: unknown): RoleData {
   const map = objectFromUnknown(input);

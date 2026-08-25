@@ -1,10 +1,10 @@
 "use client";
 
+import { useMemo, useState } from "react";
 import {
   Brain,
   Briefcase,
   Clock,
-  DotsThree,
   EnvelopeSimple,
   Globe,
   GraduationCap,
@@ -18,6 +18,9 @@ import {
 import type { Icon } from "@phosphor-icons/react";
 import type { Candidate, CandidateRow, ContactType } from "@/lib/candidate-schema";
 import Skeleton from "@/components/ui/Skeleton";
+import TimelineList from "@/components/ui/TimelineList";
+import TableSearch from "@/components/ui/TableSearch";
+import CandidateDetailsModal from "@/components/candidates/CandidateDetailsModal";
 
 export const CONTACT_ICONS: Record<ContactType, Icon> = {
   phone: Phone,
@@ -51,7 +54,6 @@ export function getInitials(name: string): string {
 }
 
 const MAX_SKILLS = 5;
-const MAX_EXPERIENCE = 3;
 
 function columnWidthClass(key: ColumnKey): string {
   switch (key) {
@@ -95,37 +97,7 @@ function SkillsCell({ skills }: { skills: string[] }) {
 function ExperienceCell({ experience }: { experience: string[] }) {
   if (experience.length === 0) return <span className="text-xs text-gray-300">N/A</span>;
 
-  return (
-    <ol className="ml-1.5 space-y-3.5 border-l border-gray-200 pl-5">
-      {experience.slice(0, MAX_EXPERIENCE).map((item, idx) => (
-        <li key={idx} className="relative">
-          <span
-            className={`absolute top-0 -left-[27px] flex h-[22px] w-[22px] items-center justify-center rounded-full shadow-sm ring-4 ring-white ${
-              idx === 0
-                ? "bg-gradient-to-b from-gray-700 to-gray-900 text-white"
-                : "bg-gray-200 text-gray-500"
-            }`}
-          >
-            <Clock size={11} weight={idx === 0 ? "fill" : "regular"} />
-          </span>
-          <span className="block pt-0.5 leading-snug text-gray-600">{item}</span>
-        </li>
-      ))}
-      {experience.length > MAX_EXPERIENCE && (
-        <li className="relative">
-          <span className="absolute top-0 -left-[27px] flex h-[22px] w-[22px] items-center justify-center rounded-full bg-gray-100 ring-4 ring-white">
-            <DotsThree size={12} weight="bold" className="text-gray-400" />
-          </span>
-          <span
-            className="block pt-1 text-xs leading-snug font-medium text-gray-400"
-            title={experience.slice(MAX_EXPERIENCE).join("\n")}
-          >
-            {experience.length - MAX_EXPERIENCE}+ more roles
-          </span>
-        </li>
-      )}
-    </ol>
-  );
+  return <TimelineList items={experience} icon={Clock} moreLabel="more roles" />;
 }
 
 function NameCell({
@@ -141,9 +113,12 @@ function NameCell({
         <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-gray-200 to-gray-300 text-sm font-bold text-gray-600 ring-1 ring-gray-900/5 ring-inset">
           {getInitials(candidate.fullName)}
         </span>
-        <span className="text-[15px] font-semibold text-gray-900">{candidate.fullName}</span>
+        <span className="text-base font-semibold text-gray-900">{candidate.fullName}</span>
         <button
-          onClick={() => onDelete(candidate)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(candidate);
+          }}
           className="ml-auto rounded-lg p-1.5 text-gray-300 opacity-0 transition-opacity duration-150 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 focus:opacity-100"
           aria-label={`Delete ${candidate.fullName}`}
           title="Delete candidate"
@@ -185,15 +160,34 @@ export default function CandidatesTable({
   loading,
   onDeleteRequest,
 }: CandidatesTableProps) {
+  const [selected, setSelected] = useState<CandidateRow | null>(null);
+  const [query, setQuery] = useState("");
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return candidates;
+    return candidates.filter((c) =>
+      [c.fullName, c.summary, c.education, ...c.skills, ...c.experience]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(q)
+    );
+  }, [candidates, query]);
+
   return (
     <div className="overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm backdrop-blur">
+      {/* Search toolbar */}
+      <div className="border-b border-gray-100 px-4 py-3">
+        <TableSearch value={query} onChange={setQuery} placeholder="Search candidates…" />
+      </div>
       <table className="w-full border-collapse text-left text-sm">
         <thead>
           <tr className="border-b border-gray-800 bg-gradient-to-b from-gray-700 to-gray-900">
             {CANDIDATE_COLUMNS.map((col, ci) => (
               <th
                 key={col.key}
-                className={`px-4 py-3.5 text-[11px] font-semibold tracking-wider text-white uppercase ${
+                className={`px-4 py-3.5 text-[13px] font-semibold tracking-wider text-white uppercase ${
                   ci === 0 ? "w-[30%] min-w-[440px]" : ""
                 } ${col.key === "experience" ? "min-w-[300px]" : ""} ${
                   col.key === "education" ? "max-w-[220px]" : ""
@@ -210,15 +204,19 @@ export default function CandidatesTable({
         <tbody className="divide-y divide-gray-100">
           {loading ? (
             <CandidateSkeletonRows />
-          ) : candidates.length === 0 ? (
+          ) : filtered.length === 0 ? (
             <tr>
               <td colSpan={CANDIDATE_COLUMNS.length}>
-                <EmptyState />
+                <EmptyState query={query.trim()} />
               </td>
             </tr>
           ) : (
-            candidates.map((c, i) => (
-              <tr key={c.id ?? i} className="group fade-row">
+            filtered.map((c, i) => (
+              <tr
+                key={c.id ?? i}
+                onClick={() => setSelected(c)}
+                className="group fade-row cursor-pointer"
+              >
                 {CANDIDATE_COLUMNS.map((col, ci) => (
                   <td
                     key={col.key}
@@ -234,6 +232,8 @@ export default function CandidatesTable({
           )}
         </tbody>
       </table>
+
+      {selected && <CandidateDetailsModal candidate={selected} onClose={() => setSelected(null)} />}
     </div>
   );
 }
@@ -249,16 +249,20 @@ function renderCell(
   return <span className="leading-relaxed text-gray-600">{candidate[key]}</span>;
 }
 
-function EmptyState() {
+function EmptyState({ query }: { query: string }) {
   return (
     <div className="flex flex-col items-center justify-center gap-3 px-6 py-16 text-center">
       <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gray-100 text-gray-400 ring-1 ring-gray-200/70 ring-inset">
         <Tray size={26} />
       </div>
       <div>
-        <p className="text-sm font-medium text-gray-600">No candidates yet</p>
+        <p className="text-sm font-medium text-gray-600">
+          {query ? "No matches" : "No candidates yet"}
+        </p>
         <p className="mt-1 text-xs text-gray-400">
-          Upload a resume PDF to extract candidate details automatically.
+          {query
+            ? `Nothing found for \u201C${query}\u201D.`
+            : "Upload a resume PDF to extract candidate details automatically."}
         </p>
       </div>
     </div>

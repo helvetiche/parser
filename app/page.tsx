@@ -141,7 +141,7 @@ function ParserApp() {
             </div>
             <div className="leading-tight">
               <span className="block text-base font-semibold tracking-tight">Parser</span>
-              <span className="block text-[11px] font-medium text-gray-400">AI resume parsing</span>
+              <span className="block text-[13px] font-medium text-gray-400">AI resume parsing</span>
             </div>
           </div>
           <div className="flex items-center gap-3">

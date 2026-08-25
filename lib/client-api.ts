@@ -1,5 +1,7 @@
 import type { Candidate, CandidateRow } from "./candidate-schema";
 import type { RoleData, RoleRow } from "./role-schema";
+import type { MatchResult } from "./match-schema";
+import type { PromptData, PromptRow } from "./prompt-schema";
 import { getIdToken } from "./auth";
 
 /** GET payload of /api/candidates */
@@ -7,6 +9,14 @@ export type CandidatesResponse = { candidates: CandidateRow[] };
 
 /** GET payload of /api/roles */
 export type RolesResponse = { roles: RoleRow[] };
+
+/** GET payload of /api/prompts */
+export type PromptsResponse = { prompts: PromptRow[] };
+
+/** POST payload of /api/match */
+export type MatchResponse = {
+  results: Array<{ roleId: string; match?: MatchResult; error?: string }>;
+};
 
 /**
  * Typed browser-side wrappers around the app's route handlers.
@@ -70,6 +80,50 @@ export async function extractRoleFromText(text: string, model?: string): Promise
   return data.role as RoleData;
 }
 
+export async function matchCandidateToRoles(
+  candidateId: string,
+  model?: string
+): Promise<MatchResponse> {
+  const res = await authedFetch("/api/match", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(model ? { candidateId, model } : { candidateId }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to match candidate to roles"));
+  return data as MatchResponse;
+}
+
+export async function evaluateCandidateForRole(
+  candidateId: string,
+  roleId: string,
+  promptId?: string
+): Promise<MatchResult> {
+  const res = await authedFetch("/api/match", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      candidateId,
+      roleId,
+      ...(promptId ? { promptId } : {}),
+    }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to evaluate candidate"));
+  const first = (data as MatchResponse).results?.[0];
+  if (!first || first.error || !first.match) {
+    throw new Error(first?.error ?? "Failed to evaluate candidate");
+  }
+  return first.match;
+}
+
+export async function listPrompts(): Promise<PromptsResponse> {
+  const res = await authedFetch("/api/prompts");
+  const data = await res.json();
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to load prompts"));
+  return data as PromptsResponse;
+}
+
 export async function sendChatMessage(
   messages: Array<{ role: string; content: string }>,
   model: string
@@ -123,4 +177,35 @@ export async function deleteRole(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok && res.status !== 204) throw new Error(await errorFrom(res, "Failed to delete role"));
+}
+
+/* ---------------- Prompt mutations ---------------- */
+
+export async function createPrompt(prompt: PromptData): Promise<PromptRow> {
+  const res = await authedFetch("/api/prompts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to save prompt"));
+  const data = await res.json();
+  return data.prompt as PromptRow;
+}
+
+export async function updatePrompt(id: string, prompt: PromptData): Promise<void> {
+  const res = await authedFetch(`/api/prompts/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ prompt }),
+  });
+  if (!res.ok && res.status !== 204)
+    throw new Error(await errorFrom(res, "Failed to update prompt"));
+}
+
+export async function deletePrompt(id: string): Promise<void> {
+  const res = await authedFetch(`/api/prompts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok && res.status !== 204)
+    throw new Error(await errorFrom(res, "Failed to delete prompt"));
 }

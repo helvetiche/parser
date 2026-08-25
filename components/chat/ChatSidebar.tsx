@@ -144,7 +144,7 @@ export default function ChatSidebar({
 
         {/* Model selector */}
         <div className="border-b border-gray-200/80 bg-gray-50/60 px-6 py-4">
-          <label className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold tracking-wider text-gray-500 uppercase">
+          <label className="mb-1.5 flex items-center gap-1.5 text-[13px] font-semibold tracking-wider text-gray-500 uppercase">
             <Cpu size={13} />
             Model
           </label>
@@ -243,7 +243,7 @@ export default function ChatSidebar({
               <PaperPlaneRight size={16} weight="fill" />
             </button>
           </div>
-          <p className="mt-2 text-center text-[10px] text-gray-400">
+          <p className="mt-2 text-center text-[12px] text-gray-400">
             Enter to send · Shift + Enter for a new line
           </p>
         </div>
@@ -277,7 +277,7 @@ function MessageBubble({ message, streaming }: { message: Message; streaming: bo
         </div>
         {!streaming && (
           <span
-            className={`mt-1.5 text-[10px] font-medium text-gray-400 ${
+            className={`mt-1.5 text-[12px] font-medium text-gray-400 ${
               isUser ? "text-right" : "pl-0.5 text-left"
             }`}
           >

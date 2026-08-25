@@ -14,8 +14,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "Missing PDF text" }, { status: 400 });
     }
 
-    const selectedModel =
-      typeof model === "string" && model.trim() ? model : ROLE_MODEL;
+    const selectedModel = typeof model === "string" && model.trim() ? model : ROLE_MODEL;
 
     if (!isReadableText(text)) {
       return NextResponse.json(

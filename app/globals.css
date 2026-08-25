@@ -1,7 +1,16 @@
 @import "tailwindcss";
 
 @theme inline {
-  --font-sans: var(--font-geist);
+  --font-sans: var(--font-manrope);
+}
+
+/* System-wide font size bump (defaults: xs .75 / sm .875 / lg 1.125 / xl 1.25 / 2xl 1.5) */
+@theme {
+  --text-xs: 0.8125rem;
+  --text-sm: 0.9375rem;
+  --text-lg: 1.25rem;
+  --text-xl: 1.375rem;
+  --text-2xl: 1.6875rem;
 }
 
 body {

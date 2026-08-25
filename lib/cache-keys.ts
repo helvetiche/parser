@@ -5,4 +5,5 @@
 export const cacheKeys = {
   candidates: "/api/candidates",
   roles: "/api/roles",
+  prompts: "/api/prompts",
 } as const;

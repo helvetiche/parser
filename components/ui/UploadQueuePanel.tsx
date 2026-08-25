@@ -89,7 +89,7 @@ function Row({
       {job.status === "failed" ? (
         <>
           <span
-            className="max-w-[40%] truncate text-[11px] text-red-500"
+            className="max-w-[40%] truncate text-[13px] text-red-500"
             title={`${job.error ?? "Failed"} · attempt ${job.attempts}/${MAX_ATTEMPTS}`}
           >
             {job.error ?? "Failed"} · {job.attempts}/{MAX_ATTEMPTS}

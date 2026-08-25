@@ -1,7 +1,9 @@
 import { getFirestore } from "firebase-admin/firestore";
 import { getAdminApp } from "./firebase-admin";
 import { candidateFromUnknown, type Candidate, type CandidateRow } from "./candidate-schema";
-import { roleFromUnknown, type RoleData, type RoleRow } from "./role-schema";
+import { matchFromUnknown } from "./match-schema";
+import { roleFromUnknown, type RoleData, type RoleRow, type SavedEvaluation } from "./role-schema";
+import { promptFromUnknown, type PromptData, type PromptRow } from "./prompt-schema";
 
 /**
  * Server-side Firestore access via the Admin SDK.
@@ -16,6 +18,7 @@ export function getAdminDb() {
 
 const CANDIDATES = "candidates";
 const ROLES = "roles";
+const PROMPTS = "prompts";
 
 /* ---------------- Candidates ---------------- */
 
@@ -26,6 +29,12 @@ export async function listCandidates(): Promise<CandidateRow[]> {
     ...candidateFromUnknown(doc.data()),
     id: doc.id,
   }));
+}
+
+export async function getCandidate(id: string): Promise<CandidateRow | null> {
+  const doc = await getAdminDb().collection(CANDIDATES).doc(id).get();
+  if (!doc.exists) return null;
+  return { ...candidateFromUnknown(doc.data()), id: doc.id };
 }
 
 export async function addCandidate(input: unknown): Promise<CandidateRow> {
@@ -48,13 +57,53 @@ export async function removeCandidate(id: string): Promise<void> {
 
 /* ---------------- Roles ---------------- */
 
+/** Rebuilds the evaluations map from raw document data, skipping junk entries. */
+function evaluationsFromData(data: Record<string, unknown> | undefined) {
+  const raw = data?.evaluations;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+
+  const out: Record<string, SavedEvaluation> = {};
+  for (const [candidateId, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const obj = entry as Record<string, unknown>;
+    const evaluatedAt = typeof obj.evaluatedAt === "string" ? obj.evaluatedAt : "";
+    if (!evaluatedAt) continue;
+    out[candidateId] = {
+      ...matchFromUnknown(obj),
+      candidateId,
+      candidateName: typeof obj.candidateName === "string" ? obj.candidateName : "",
+      evaluatedAt,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 export async function listRoles(): Promise<RoleRow[]> {
   const snapshot = await getAdminDb().collection(ROLES).orderBy("createdAt", "desc").get();
 
-  return snapshot.docs.map((doc) => ({
-    ...roleFromUnknown(doc.data()),
-    id: doc.id,
-  }));
+  return snapshot.docs.map((doc) => {
+    const evaluations = evaluationsFromData(doc.data());
+    return {
+      ...roleFromUnknown(doc.data()),
+      ...(evaluations ? { evaluations } : {}),
+      id: doc.id,
+    };
+  });
+}
+
+/**
+ * Persists one candidate evaluation on the role document under
+ * `evaluations.<candidateId>` so the dotted path merges instead of
+ * clobbering other candidates' stored evaluations.
+ */
+export async function saveRoleEvaluation(
+  roleId: string,
+  evaluation: SavedEvaluation
+): Promise<void> {
+  await getAdminDb()
+    .collection(ROLES)
+    .doc(roleId)
+    .update({ [`evaluations.${evaluation.candidateId}`]: evaluation });
 }
 
 export async function addRole(input: unknown): Promise<RoleRow> {
@@ -72,4 +121,54 @@ export async function addRole(input: unknown): Promise<RoleRow> {
 
 export async function removeRole(id: string): Promise<void> {
   await getAdminDb().collection(ROLES).doc(id).delete();
+}
+
+/* ---------------- Prompts ---------------- */
+
+function requirePromptBody(prompt: PromptData): PromptData {
+  if (!prompt.prompt) throw new Error("Prompt text is required");
+  return prompt;
+}
+
+export async function listPrompts(): Promise<PromptRow[]> {
+  const snapshot = await getAdminDb().collection(PROMPTS).orderBy("createdAt", "desc").get();
+
+  return snapshot.docs.map((doc) => ({
+    ...promptFromUnknown(doc.data()),
+    id: doc.id,
+  }));
+}
+
+export async function addPrompt(input: unknown): Promise<PromptRow> {
+  const prompt = requirePromptBody(promptFromUnknown(input));
+
+  const ref = await getAdminDb()
+    .collection(PROMPTS)
+    .add({
+      ...prompt,
+      createdAt: new Date(),
+    });
+
+  return { ...prompt, id: ref.id };
+}
+
+export async function updatePrompt(id: string, input: unknown): Promise<void> {
+  const prompt = requirePromptBody(promptFromUnknown(input));
+  await getAdminDb()
+    .collection(PROMPTS)
+    .doc(id)
+    .update({ ...prompt });
+}
+
+export async function removePrompt(id: string): Promise<void> {
+  await getAdminDb().collection(PROMPTS).doc(id).delete();
+}
+
+/** Loads a saved prompt's instruction text; null when missing so callers fall back to the default. */
+export async function getPromptInstructions(id: string): Promise<string | null> {
+  if (!id) return null;
+  const doc = await getAdminDb().collection(PROMPTS).doc(id).get();
+  if (!doc.exists) return null;
+  const prompt = promptFromUnknown(doc.data());
+  return prompt.prompt || null;
 }

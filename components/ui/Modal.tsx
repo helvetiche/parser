@@ -2,6 +2,7 @@
 
 import { X } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 
 type ModalProps = {
@@ -11,13 +12,16 @@ type ModalProps = {
   onClose: () => void;
   /** While true, closing is blocked and the close button is disabled. */
   busy?: boolean;
-  size?: "sm" | "md";
+  size?: "sm" | "md" | "lg";
+  /** Renders the panel as a flex column capped at 85vh; children supply their own scroll region. */
+  scroll?: boolean;
   children: ReactNode;
 };
 
 const PANEL_SIZES = {
   sm: "max-w-sm",
   md: "max-w-md",
+  lg: "max-w-4xl",
 } as const;
 
 export default function Modal({
@@ -25,13 +29,16 @@ export default function Modal({
   onClose,
   busy = false,
   size = "md",
+  scroll = false,
   children,
 }: ModalProps) {
   useEscapeKey(() => {
     if (!busy) onClose();
   }, true);
 
-  return (
+  if (typeof document === "undefined") return null;
+
+  return createPortal(
     <div
       className="fixed inset-0 z-[70] flex items-center justify-center p-6"
       role="dialog"
@@ -43,11 +50,14 @@ export default function Modal({
         className="absolute inset-0 bg-gray-950/40 backdrop-blur-sm"
       />
       <div
-        className={`relative ${PANEL_SIZES[size]} rounded-2xl border border-gray-200 bg-white p-6 shadow-2xl`}
+        className={`relative ${PANEL_SIZES[size]} rounded-2xl border border-gray-200 bg-white shadow-2xl ${
+          scroll ? "flex max-h-[85vh] flex-col overflow-hidden" : "p-6"
+        }`}
       >
         {children}
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
