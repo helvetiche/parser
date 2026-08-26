@@ -49,7 +49,7 @@ export default function LoginPage() {
   };
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-gradient-to-b from-gray-100 via-gray-50 to-gray-200 px-5">
+    <main className="relative flex min-h-screen items-center justify-center px-5">
       <div className="w-full max-w-sm rounded-2xl border border-gray-200/80 bg-white/90 p-8 shadow-xl backdrop-blur">
         <div className="flex flex-col items-center gap-3 text-center">
           <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-gray-600 to-gray-900 text-white shadow-md">

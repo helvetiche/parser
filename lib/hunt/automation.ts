@@ -15,6 +15,20 @@ export type BrowserTabsResult = {
 const DEFAULT_CDP = "http://127.0.0.1:9222";
 const TITLE_TIMEOUT_MS = 1500;
 
+/** Command to launch Chrome with the DevTools port open (copy/paste into Terminal). */
+const CHROME_LAUNCH_CMD =
+  '"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --remote-debugging-port=9222';
+
+/** Error shown when no browser is listening on the CDP endpoint. */
+function browserUnreachableError(endpoint: string): Error {
+  return new Error(
+    `Could not reach a browser at ${endpoint}.\n\n` +
+      `Start Chrome with remote debugging enabled, then reload this tab. ` +
+      `Run this in Terminal:\n\n` +
+      `  ${CHROME_LAUNCH_CMD}\n`
+  );
+}
+
 /** Sourcing platforms whose tabs we care about for hunting. */
 const SOURCING_HOSTS = ["linkedin.com", "jobstreet.com"];
 
@@ -51,10 +65,7 @@ export async function listBrowserTabs(endpoint: string = DEFAULT_CDP): Promise<B
     // Bound the connect step so an unreachable endpoint fails fast.
     browser = await chromium.connectOverCDP(endpoint, { timeout: 5000 });
   } catch {
-    throw new Error(
-      `Could not reach a browser at ${endpoint}. Start Chrome with: ` +
-        `--remote-debugging-port=9222 (then reload this tab).`
-    );
+    throw browserUnreachableError(endpoint);
   }
 
   try {
@@ -108,10 +119,7 @@ export async function focusBrowserTab(
   try {
     browser = await chromium.connectOverCDP(endpoint, { timeout: 5000 });
   } catch {
-    throw new Error(
-      `Could not reach a browser at ${endpoint}. Start Chrome with: ` +
-        `--remote-debugging-port=9222 (then reload this tab).`
-    );
+    throw browserUnreachableError(endpoint);
   }
 
   try {
@@ -159,10 +167,7 @@ export async function scrapeCandidates(
   try {
     browser = await chromium.connectOverCDP(endpoint, { timeout: 5000 });
   } catch {
-    throw new Error(
-      `Could not reach a browser at ${endpoint}. Start Chrome with: ` +
-        `--remote-debugging-port=9222 (then reload this tab).`
-    );
+    throw browserUnreachableError(endpoint);
   }
 
   try {
@@ -305,10 +310,7 @@ export async function extractCandidateProfile(
   try {
     browser = await chromium.connectOverCDP(endpoint, { timeout: 5000 });
   } catch {
-    throw new Error(
-      `Could not reach a browser at ${endpoint}. Start Chrome with: ` +
-        `--remote-debugging-port=9222 (then reload this tab).`
-    );
+    throw browserUnreachableError(endpoint);
   }
 
   const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));

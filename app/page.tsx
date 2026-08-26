@@ -129,7 +129,7 @@ function ParserApp() {
 
   return (
     <main
-      className="min-h-screen bg-gradient-to-b from-gray-100 via-gray-50 to-gray-200 text-gray-900 antialiased"
+      className="relative min-h-screen text-gray-900 antialiased"
       onDragEnter={handleDragEnter}
       onDragOver={(e) => e.preventDefault()}
       onDragLeave={handleDragLeave}

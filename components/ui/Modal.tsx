@@ -1,9 +1,16 @@
 "use client";
 
 import { X } from "@phosphor-icons/react";
-import type { ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
+
+/**
+ * Lets a nested ModalCloseButton trigger the parent's animated close
+ * (e.g. the Drawer's slide-out) instead of unmounting immediately.
+ * Returns null when no animated close is provided.
+ */
+export const ModalCloseContext = createContext<(() => void) | null>(null);
 
 type ModalProps = {
   /** Accessible name source: the id of the heading inside the panel. */
@@ -69,9 +76,11 @@ export function ModalCloseButton({
   onClose: () => void;
   disabled?: boolean;
 }) {
+  const animatedClose = useContext(ModalCloseContext);
+  const handleClose = animatedClose ?? onClose;
   return (
     <button
-      onClick={onClose}
+      onClick={handleClose}
       disabled={disabled}
       className="rounded-lg p-2 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50"
       aria-label="Close dialog"
