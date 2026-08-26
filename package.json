@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
+    "@playwright/test": "^1.62.1",
     "firebase": "^12.18.0",
     "firebase-admin": "^14.3.0",
     "json5": "^2.2.3",
@@ -19,6 +20,7 @@
     "pdf-parse": "^1.1.1",
     "pdf2json": "^4.0.3",
     "pdfjs-dist": "^4.10.38",
+    "playwright": "^1.62.1",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-feather": "^2.0.10",

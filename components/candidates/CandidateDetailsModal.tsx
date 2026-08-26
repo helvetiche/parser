@@ -15,9 +15,11 @@ function TextValue({ children }: { children: ReactNode }) {
 export default function CandidateDetailsModal({
   candidate,
   onClose,
+  footer,
 }: {
   candidate: CandidateRow;
   onClose: () => void;
+  footer?: ReactNode;
 }) {
   return (
     <Modal labelledBy="candidate-details-title" onClose={onClose} size="lg" scroll>
@@ -118,6 +120,8 @@ export default function CandidateDetailsModal({
           )}
         </DetailsSection>
       </div>
+
+      {footer && <div className="border-t border-gray-100 px-6 py-5">{footer}</div>}
     </Modal>
   );
 }

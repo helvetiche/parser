@@ -7,6 +7,7 @@ import {
   ClipboardText,
   FileArrowUp,
   Sparkle,
+  Target,
   UploadSimple,
   Users,
   WarningCircle,
@@ -20,16 +21,18 @@ import LogoutButton from "@/components/auth/LogoutButton";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ModelSelect from "@/components/ui/ModelSelect";
 import RoleDescription from "@/components/RoleDescription";
+import HuntAutomation from "@/components/HuntAutomation";
 import { deleteCandidate, parsePdfFile, type CandidatesResponse } from "@/lib/client-api";
 import type { CandidateRow } from "@/lib/candidate-schema";
 import { cacheKeys } from "@/lib/cache-keys";
 import { DEFAULT_MODEL } from "@/lib/models";
 
-type TabId = "candidates" | "role";
+type TabId = "candidates" | "role" | "hunt";
 
 const TABS: { id: TabId; label: string; icon: Icon }[] = [
   { id: "candidates", label: "Candidates", icon: Users },
   { id: "role", label: "Role Description", icon: ClipboardText },
+  { id: "hunt", label: "Hunt Automation", icon: Target },
 ];
 
 type AttachedPdf = {
@@ -203,6 +206,8 @@ function ParserApp() {
         )}
 
         {activeTab === "role" && <RoleDescription />}
+
+        {activeTab === "hunt" && <HuntAutomation />}
       </div>
 
       {/* Drag overlay */}

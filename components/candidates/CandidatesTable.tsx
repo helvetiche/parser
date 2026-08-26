@@ -153,12 +153,27 @@ type CandidatesTableProps = {
   candidates: CandidateRow[];
   loading: boolean;
   onDeleteRequest: (candidate: CandidateRow) => void;
+  /** Optional actions rendered on the right side of the search toolbar. */
+  actions?: React.ReactNode;
+  /** Enables row multi-selection (used by Hunt Automation). */
+  selectable?: boolean;
+  selectedIds?: string[];
+  onToggleRow?: (id: string) => void;
+  onToggleAll?: (visibleIds: string[]) => void;
+  /** Optional footer rendered at the bottom of a candidate's detail modal. */
+  detailFooter?: (candidate: CandidateRow) => React.ReactNode;
 };
 
 export default function CandidatesTable({
   candidates,
   loading,
   onDeleteRequest,
+  actions,
+  selectable = false,
+  selectedIds = [],
+  onToggleRow,
+  onToggleAll,
+  detailFooter,
 }: CandidatesTableProps) {
   const [selected, setSelected] = useState<CandidateRow | null>(null);
   const [query, setQuery] = useState("");
@@ -175,23 +190,45 @@ export default function CandidatesTable({
     );
   }, [candidates, query]);
 
+  const colCount = CANDIDATE_COLUMNS.length + (selectable ? 1 : 0);
+  const visibleIds = filtered.map((c) => c.id);
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
+  const someSelected = visibleIds.some((id) => selectedIds.includes(id));
+
   return (
     <div className="overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm backdrop-blur">
       {/* Search toolbar */}
-      <div className="border-b border-gray-100 px-4 py-3">
-        <TableSearch value={query} onChange={setQuery} placeholder="Search candidates…" />
+      <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
+        <div className="flex-1">
+          <TableSearch value={query} onChange={setQuery} placeholder="Search candidates…" />
+        </div>
+        {actions}
       </div>
       <table className="w-full border-collapse text-left text-sm">
         <thead>
           <tr className="border-b border-gray-800 bg-gradient-to-b from-gray-700 to-gray-900">
+            {selectable && (
+              <th className="w-10 px-4 py-3.5">
+                <input
+                  type="checkbox"
+                  aria-label="Select all candidates"
+                  checked={allSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = !allSelected && someSelected;
+                  }}
+                  onChange={() => onToggleAll?.(visibleIds)}
+                  className="h-4 w-4 cursor-pointer accent-white"
+                />
+              </th>
+            )}
             {CANDIDATE_COLUMNS.map((col, ci) => (
               <th
                 key={col.key}
                 className={`px-4 py-3.5 text-[13px] font-semibold tracking-wider text-white uppercase ${
-                  ci === 0 ? "w-[30%] min-w-[440px]" : ""
+                  ci === 0 && !selectable ? "w-[30%] min-w-[440px]" : ""
                 } ${col.key === "experience" ? "min-w-[300px]" : ""} ${
                   col.key === "education" ? "max-w-[220px]" : ""
-                } ${ci > 0 ? "border-l border-gray-500/40" : ""}`}
+                } ${ci > 0 || selectable ? "border-l border-gray-500/40" : ""}`}
               >
                 <span className="flex items-center gap-2">
                   <col.icon size={14} weight="fill" className="shrink-0 text-white" />
@@ -203,10 +240,10 @@ export default function CandidatesTable({
         </thead>
         <tbody className="divide-y divide-gray-100">
           {loading ? (
-            <CandidateSkeletonRows />
+            <CandidateSkeletonRows selectable={selectable} />
           ) : filtered.length === 0 ? (
             <tr>
-              <td colSpan={CANDIDATE_COLUMNS.length}>
+              <td colSpan={colCount}>
                 <EmptyState query={query.trim()} />
               </td>
             </tr>
@@ -217,11 +254,25 @@ export default function CandidatesTable({
                 onClick={() => setSelected(c)}
                 className="group fade-row cursor-pointer"
               >
+                {selectable && (
+                  <td
+                    className="w-10 px-4 py-3.5 align-top"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    <input
+                      type="checkbox"
+                      aria-label={`Select ${c.fullName}`}
+                      checked={selectedIds.includes(c.id)}
+                      onChange={() => onToggleRow?.(c.id)}
+                      className="h-4 w-4 cursor-pointer accent-gray-900"
+                    />
+                  </td>
+                )}
                 {CANDIDATE_COLUMNS.map((col, ci) => (
                   <td
                     key={col.key}
                     className={`${columnWidthClass(col.key)} px-4 py-3.5 text-justify align-top ${
-                      ci > 0 ? "border-l border-gray-100" : ""
+                      ci > 0 || selectable ? "border-l border-gray-100" : ""
                     }`}
                   >
                     {renderCell(col.key, c, onDeleteRequest)}
@@ -233,7 +284,13 @@ export default function CandidatesTable({
         </tbody>
       </table>
 
-      {selected && <CandidateDetailsModal candidate={selected} onClose={() => setSelected(null)} />}
+      {selected && (
+        <CandidateDetailsModal
+          candidate={selected}
+          onClose={() => setSelected(null)}
+          footer={detailFooter?.(selected)}
+        />
+      )}
     </div>
   );
 }
@@ -271,11 +328,12 @@ function EmptyState({ query }: { query: string }) {
 
 const SKELETON_ROWS = 4;
 
-function CandidateSkeletonRows() {
+function CandidateSkeletonRows({ selectable = false }: { selectable?: boolean }) {
   return (
     <>
       {Array.from({ length: SKELETON_ROWS }, (_, row) => (
         <tr key={row}>
+          {selectable && <td className="w-10 px-4 py-3.5 align-top" />}
           {CANDIDATE_COLUMNS.map((col, ci) => (
             <td
               key={col.key}

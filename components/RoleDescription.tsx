@@ -185,6 +185,9 @@ export default function RoleDescription() {
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <div className="mb-1 flex items-center gap-2.5">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-gray-600 to-gray-900 text-white shadow-md">
+              <ClipboardText size={18} weight="fill" />
+            </div>
             <h2 className="text-2xl font-semibold tracking-tight text-gray-900">
               Role Descriptions
             </h2>
