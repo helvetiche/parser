@@ -1,8 +1,15 @@
-import { getFirestore } from "firebase-admin/firestore";
+import { FieldValue, getFirestore } from "firebase-admin/firestore";
 import { getAdminApp } from "./firebase-admin";
 import { candidateFromUnknown, type Candidate, type CandidateRow } from "./candidate-schema";
 import { matchFromUnknown } from "./match-schema";
-import { roleFromUnknown, type RoleData, type RoleRow, type SavedEvaluation } from "./role-schema";
+import {
+  roleFromUnknown,
+  type Endorsement,
+  type EndorsementStatus,
+  type RoleData,
+  type RoleRow,
+  type SavedEvaluation,
+} from "./role-schema";
 import { promptFromUnknown, type PromptData, type PromptRow } from "./prompt-schema";
 
 /**
@@ -82,13 +89,45 @@ export async function listRoles(): Promise<RoleRow[]> {
   const snapshot = await getAdminDb().collection(ROLES).orderBy("createdAt", "desc").get();
 
   return snapshot.docs.map((doc) => {
-    const evaluations = evaluationsFromData(doc.data());
+    const data = doc.data();
+    const evaluations = evaluationsFromData(data);
+    const endorsements = endorsementsFromData(data);
     return {
-      ...roleFromUnknown(doc.data()),
+      ...roleFromUnknown(data),
       ...(evaluations ? { evaluations } : {}),
+      ...(endorsements ? { endorsements } : {}),
       id: doc.id,
     };
   });
+}
+
+/** Rebuilds the endorsements map from raw document data, skipping junk entries. */
+function endorsementsFromData(data: Record<string, unknown> | undefined) {
+  const raw = data?.endorsements;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+
+  const out: Record<string, Endorsement> = {};
+  for (const [candidateId, entry] of Object.entries(raw as Record<string, unknown>)) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const obj = entry as Record<string, unknown>;
+    const addedAt = typeof obj.addedAt === "string" ? obj.addedAt : "";
+    if (!addedAt) continue;
+    const status = obj.status;
+    if (
+      status !== "endorsed" &&
+      status !== "interviewed" &&
+      status !== "hired" &&
+      status !== "rejected"
+    )
+      continue;
+    out[candidateId] = {
+      candidateId,
+      candidateName: typeof obj.candidateName === "string" ? obj.candidateName : "",
+      status: status as EndorsementStatus,
+      addedAt,
+    };
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /**
@@ -121,6 +160,31 @@ export async function addRole(input: unknown): Promise<RoleRow> {
 
 export async function removeRole(id: string): Promise<void> {
   await getAdminDb().collection(ROLES).doc(id).delete();
+}
+
+/**
+ * Upserts one submitted candidate on the role document under
+ * `endorsements.<candidateId>` so the dotted path merges instead of
+ * clobbering other candidates' endorsements.
+ */
+export async function saveRoleEndorsement(
+  roleId: string,
+  endorsement: Endorsement
+): Promise<void> {
+  await getAdminDb()
+    .collection(ROLES)
+    .doc(roleId)
+    .update({ [`endorsements.${endorsement.candidateId}`]: endorsement });
+}
+
+export async function removeRoleEndorsement(
+  roleId: string,
+  candidateId: string
+): Promise<void> {
+  await getAdminDb()
+    .collection(ROLES)
+    .doc(roleId)
+    .update({ [`endorsements.${candidateId}`]: FieldValue.delete() });
 }
 
 /* ---------------- Prompts ---------------- */

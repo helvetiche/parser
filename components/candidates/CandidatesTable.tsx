@@ -2,7 +2,6 @@
 
 import { useMemo, useState } from "react";
 import {
-  Brain,
   Briefcase,
   Clock,
   EnvelopeSimple,
@@ -40,7 +39,6 @@ export const CANDIDATE_COLUMNS: {
   { key: "education", label: "Education", icon: GraduationCap },
   { key: "experience", label: "Experience", icon: Briefcase },
   { key: "skills", label: "Skills", icon: Lightning },
-  { key: "reasoning", label: "Reasoning", icon: Brain },
 ];
 
 export function getInitials(name: string): string {
@@ -55,25 +53,23 @@ export function getInitials(name: string): string {
 
 const MAX_SKILLS = 5;
 
+/** Fill color follows the rate bands: green 76+, yellow 51-75, orange 26-50, red below. */
+function matchColorClass(score: number): string {
+  if (score >= 76) return "bg-emerald-500";
+  if (score >= 51) return "bg-yellow-400";
+  if (score >= 26) return "bg-orange-400";
+  return "bg-red-500";
+}
+
 function columnWidthClass(key: ColumnKey): string {
-  switch (key) {
-    case "fullName":
-      return "min-w-[440px]";
-    case "experience":
-      return "min-w-[300px]";
-    case "education":
-      return "max-w-[220px]";
-    case "reasoning":
-      return "max-w-[460px]";
-    default:
-      return "";
-  }
+  void key;
+  return "";
 }
 
 function SkillsCell({ skills }: { skills: string[] }) {
   if (skills.length === 0) return <span className="text-xs text-gray-300">N/A</span>;
   return (
-    <div className="flex max-w-[220px] flex-wrap gap-1.5">
+    <div className="flex flex-wrap items-center justify-start gap-1.5">
       {skills.slice(0, MAX_SKILLS).map((skill) => (
         <span
           key={skill}
@@ -103,9 +99,11 @@ function ExperienceCell({ experience }: { experience: string[] }) {
 function NameCell({
   candidate,
   onDelete,
+  matchScore,
 }: {
   candidate: CandidateRow;
   onDelete: (candidate: CandidateRow) => void;
+  matchScore?: number;
 }) {
   return (
     <div className="flex flex-col gap-2.5">
@@ -126,6 +124,17 @@ function NameCell({
           <Trash size={15} />
         </button>
       </div>
+      {typeof matchScore === "number" && (
+        <div className="flex items-center gap-2">
+          <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-gray-100 ring-1 ring-gray-200/60 ring-inset">
+            <div
+              className={`h-full rounded-full transition-[width] duration-500 ease-out ${matchColorClass(matchScore)}`}
+              style={{ width: `${matchScore}%` }}
+            />
+          </div>
+          <span className="text-[11px] font-bold text-gray-500 tabular-nums">{matchScore}%</span>
+        </div>
+      )}
       {candidate.summary && (
         <p className="text-xs leading-relaxed text-gray-500">{candidate.summary}</p>
       )}
@@ -159,6 +168,8 @@ type CandidatesTableProps = {
   selectable?: boolean;
   selectedIds?: string[];
   onToggleRow?: (id: string) => void;
+  /** Per-candidate match score (0-100) against the selected role; renders a bar in the Candidate column. */
+  matchScores?: Record<string, number>;
   onToggleAll?: (visibleIds: string[]) => void;
   /** Optional footer rendered at the bottom of a candidate's detail modal. */
   detailFooter?: (candidate: CandidateRow) => React.ReactNode;
@@ -173,6 +184,7 @@ export default function CandidatesTable({
   selectedIds = [],
   onToggleRow,
   onToggleAll,
+  matchScores,
   detailFooter,
 }: CandidatesTableProps) {
   const [selected, setSelected] = useState<CandidateRow | null>(null);
@@ -224,11 +236,9 @@ export default function CandidatesTable({
             {CANDIDATE_COLUMNS.map((col, ci) => (
               <th
                 key={col.key}
-                className={`px-4 py-3.5 text-[13px] font-semibold tracking-wider text-white uppercase ${
-                  ci === 0 && !selectable ? "w-[30%] min-w-[440px]" : ""
-                } ${col.key === "experience" ? "min-w-[300px]" : ""} ${
-                  col.key === "education" ? "max-w-[220px]" : ""
-                } ${ci > 0 || selectable ? "border-l border-gray-500/40" : ""}`}
+                className={`w-[25%] px-4 py-3.5 text-[13px] font-semibold tracking-wider text-white uppercase ${
+                  ci > 0 || selectable ? "border-l border-gray-500/40" : ""
+                }`}
               >
                 <span className="flex items-center gap-2">
                   <col.icon size={14} weight="fill" className="shrink-0 text-white" />
@@ -275,7 +285,7 @@ export default function CandidatesTable({
                       ci > 0 || selectable ? "border-l border-gray-100" : ""
                     }`}
                   >
-                    {renderCell(col.key, c, onDeleteRequest)}
+                    {renderCell(col.key, c, onDeleteRequest, matchScores)}
                   </td>
                 ))}
               </tr>
@@ -298,9 +308,17 @@ export default function CandidatesTable({
 function renderCell(
   key: ColumnKey,
   candidate: CandidateRow,
-  onDelete: (candidate: CandidateRow) => void
+  onDelete: (candidate: CandidateRow) => void,
+  matchScores?: Record<string, number>
 ) {
-  if (key === "fullName") return <NameCell candidate={candidate} onDelete={onDelete} />;
+  if (key === "fullName")
+    return (
+      <NameCell
+        candidate={candidate}
+        onDelete={onDelete}
+        matchScore={matchScores?.[candidate.id]}
+      />
+    );
   if (key === "skills") return <SkillsCell skills={candidate.skills} />;
   if (key === "experience") return <ExperienceCell experience={candidate.experience} />;
   return <span className="leading-relaxed text-gray-600">{candidate[key]}</span>;
@@ -368,7 +386,7 @@ function SkeletonCell({ colKey }: { colKey: ColumnKey }) {
       );
     case "skills":
       return (
-        <div className="flex max-w-[220px] flex-wrap gap-1.5">
+    <div className="flex flex-wrap items-center justify-between gap-1.5">
           <Skeleton className="h-[22px] w-14 rounded-full" />
           <Skeleton className="h-[22px] w-20 rounded-full" />
           <Skeleton className="h-[22px] w-16 rounded-full" />

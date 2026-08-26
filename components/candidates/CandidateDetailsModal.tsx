@@ -1,10 +1,13 @@
 "use client";
 
-import { Article, Brain, Clock, GraduationCap, Lightning, Wallet } from "@phosphor-icons/react";
+import { Article, Brain, Clock, GraduationCap, Lightning, Sparkle, Wallet } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
-import Modal, { ModalCloseButton } from "@/components/ui/Modal";
+import { useState } from "react";
+import { ModalCloseButton } from "@/components/ui/Modal";
+import Drawer from "@/components/ui/Drawer";
 import DetailsSection, { EmptyValue } from "@/components/ui/DetailsSection";
 import TimelineList from "@/components/ui/TimelineList";
+import CandidateAIChat from "@/components/candidates/CandidateAIChat";
 import { CONTACT_ICONS, getInitials } from "@/components/candidates/CandidatesTable";
 import type { CandidateRow } from "@/lib/candidate-schema";
 
@@ -21,8 +24,14 @@ export default function CandidateDetailsModal({
   onClose: () => void;
   footer?: ReactNode;
 }) {
+  const [chatOpen, setChatOpen] = useState(false);
+
   return (
-    <Modal labelledBy="candidate-details-title" onClose={onClose} size="lg" scroll>
+    <Drawer
+      labelledBy="candidate-details-title"
+      onClose={onClose}
+      size={chatOpen ? "xl" : "lg"}
+    >
       {/* Header */}
       <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-5">
         <div className="flex min-w-0 items-center gap-3.5">
@@ -59,8 +68,39 @@ export default function CandidateDetailsModal({
 
       <div className="border-t border-gray-100" />
 
-      {/* Scrollable body */}
-      <div className="chat-scroll flex-1 space-y-7 overflow-y-auto px-6 py-6">
+      {chatOpen ? (
+        <div className="flex flex-1 overflow-hidden">
+          <div className="chat-scroll flex-1 space-y-7 overflow-y-auto px-6 py-6">
+            {renderInfo()}
+          </div>
+          <aside className="flex w-[37%] min-w-[320px] shrink-0 animate-slide-in-right flex-col border-l border-gray-200/80 bg-gray-50/40">
+            <CandidateAIChat candidate={candidate} onClose={() => setChatOpen(false)} />
+          </aside>
+        </div>
+      ) : (
+        <div className="chat-scroll flex-1 space-y-7 overflow-y-auto px-6 py-6">
+          <button
+            type="button"
+            onClick={() => setChatOpen(true)}
+            className="group flex w-full items-center justify-center gap-2.5 rounded-2xl border border-gray-200 bg-gradient-to-b from-white to-gray-50 px-5 py-4 text-sm font-semibold text-gray-700 shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:border-gray-300 hover:shadow-md active:translate-y-0"
+          >
+            <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-gray-600 to-gray-900 text-white shadow-sm transition-transform group-hover:scale-110">
+              <Sparkle size={16} weight="fill" />
+            </span>
+            Ask AI about this candidate
+          </button>
+
+          {renderInfo()}
+        </div>
+      )}
+
+      {footer && <div className="border-t border-gray-100 px-6 py-5">{footer}</div>}
+    </Drawer>
+  );
+
+  function renderInfo() {
+    return (
+      <>
         <DetailsSection icon={Article} title="Summary">
           {candidate.summary ? <TextValue>{candidate.summary}</TextValue> : <EmptyValue />}
         </DetailsSection>
@@ -119,9 +159,7 @@ export default function CandidateDetailsModal({
             <EmptyValue />
           )}
         </DetailsSection>
-      </div>
-
-      {footer && <div className="border-t border-gray-100 px-6 py-5">{footer}</div>}
-    </Modal>
-  );
+      </>
+    );
+  }
 }

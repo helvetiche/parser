@@ -28,6 +28,7 @@ import TableSearch from "@/components/ui/TableSearch";
 import CandidateSearch from "@/components/roles/CandidateSearch";
 import MatchBadge, { MatchBadgeError } from "@/components/roles/MatchBadge";
 import RoleDetailsModal from "@/components/roles/RoleDetailsModal";
+import SubmitCandidatesModal from "@/components/roles/SubmitCandidatesModal";
 import { getInitials } from "@/components/candidates/CandidatesTable";
 import { useUploadQueue } from "@/hooks/useUploadQueue";
 import type { RoleData, RoleRow, SavedEvaluation } from "@/lib/role-schema";
@@ -90,7 +91,15 @@ export default function RoleDescription() {
   const [parserModel, setParserModel] = useState(DEFAULT_MODEL);
   const [pendingDelete, setPendingDelete] = useState<RoleRow | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
-  const [detailsRole, setDetailsRole] = useState<RoleRow | null>(null);
+  const [detailsRoleId, setDetailsRoleId] = useState<string | null>(null);
+  const [submitOpen, setSubmitOpen] = useState(false);
+
+  // Derive the open role live from the SWR list so endorsement changes
+  // (mutated in the modal) reflect immediately without stale snapshots.
+  const detailsRole = useMemo(
+    () => roles.find((r) => r.id === detailsRoleId) ?? null,
+    [roles, detailsRoleId]
+  );
 
   /* ---- Candidate ↔ role matching ---- */
   const [selectedCandidate, setSelectedCandidate] = useState<CandidateRow | null>(null);
@@ -249,7 +258,7 @@ export default function RoleDescription() {
         roles={sortedRoles}
         loading={listLoading}
         onDeleteRequest={setPendingDelete}
-        onSelectRequest={setDetailsRole}
+        onSelectRequest={(r) => setDetailsRoleId(r.id)}
         candidates={candidates}
         activeCandidate={selectedCandidate}
         matches={matches}
@@ -261,7 +270,18 @@ export default function RoleDescription() {
           role={detailsRole}
           match={matches[detailsRole.id]}
           candidates={candidates}
-          onClose={() => setDetailsRole(null)}
+          onClose={() => setDetailsRoleId(null)}
+          onSubmitCandidates={() => setSubmitOpen(true)}
+        />
+      )}
+
+      {detailsRole && submitOpen && (
+        <SubmitCandidatesModal
+          roleId={detailsRole.id}
+          roleTitle={detailsRole.jobTitle}
+          candidates={candidates}
+          initialEndorsements={detailsRole.endorsements}
+          onClose={() => setSubmitOpen(false)}
         />
       )}
 

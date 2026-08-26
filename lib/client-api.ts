@@ -126,12 +126,13 @@ export async function listPrompts(): Promise<PromptsResponse> {
 
 export async function sendChatMessage(
   messages: Array<{ role: string; content: string }>,
-  model: string
+  model: string,
+  context?: string
 ): Promise<string> {
   const res = await authedFetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ messages, model }),
+    body: JSON.stringify(context ? { messages, model, context } : { messages, model }),
   });
   const data = await res.json();
   if (!res.ok) throw new Error(await errorFrom(res, "Request failed"));
@@ -177,6 +178,29 @@ export async function deleteRole(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok && res.status !== 204) throw new Error(await errorFrom(res, "Failed to delete role"));
+}
+
+/** Upserts a submitted candidate (endorsement) on a role. */
+export async function saveEndorsement(
+  roleId: string,
+  endorsement: { candidateId: string; candidateName: string; status: string }
+): Promise<void> {
+  const res = await authedFetch(`/api/roles/${encodeURIComponent(roleId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ endorsement }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to submit candidate"));
+}
+
+/** Removes a submitted candidate (endorsement) from a role. */
+export async function removeEndorsement(roleId: string, candidateId: string): Promise<void> {
+  const res = await authedFetch(`/api/roles/${encodeURIComponent(roleId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ removeEndorsement: candidateId }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to remove candidate"));
 }
 
 /* ---------------- Prompt mutations ---------------- */

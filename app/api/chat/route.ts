@@ -7,8 +7,8 @@ export async function POST(req: NextRequest) {
   if (denied) return denied;
 
   try {
-    const { messages, model } = await req.json();
-    const response = await chat(messages, model);
+    const { messages, model, context } = await req.json();
+    const response = await chat(messages, model, context);
     return NextResponse.json({ result: response });
   } catch (error) {
     return NextResponse.json(

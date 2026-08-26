@@ -3,12 +3,14 @@ import { DEFAULT_MODEL } from "./models";
 
 export async function chat(
   messages: Array<{ role: string; content: string }>,
-  model: string = DEFAULT_MODEL
+  model: string = DEFAULT_MODEL,
+  systemContext?: string
 ) {
+  const base =
+    "You are a helpful assistant. Never create, generate, or output tables in any format (including Markdown tables). If information would naturally be presented in a table, use a bulleted or numbered list instead.";
   const systemMessage = {
     role: "system",
-    content:
-      "You are a helpful assistant. Never create, generate, or output tables in any format (including Markdown tables). If information would naturally be presented in a table, use a bulleted or numbered list instead.",
+    content: systemContext ? `${base}\n\n${systemContext}` : base,
   };
 
   const data = (await openrouterChat({

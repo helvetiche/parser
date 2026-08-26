@@ -6,6 +6,7 @@ import { ArrowSquareOut, CaretDown, Check, CircleNotch, CloudArrowUp, Eye, Rocke
 import { getIdToken } from "@/lib/auth";
 import Modal, { ModalCloseButton } from "@/components/ui/Modal";
 import CandidatesTable from "@/components/candidates/CandidatesTable";
+import RoleDetailsModal from "@/components/roles/RoleDetailsModal";
 import { createCandidate } from "@/lib/client-api";
 import { parseProfile } from "@/lib/hunt/parse-profile";
 import type {
@@ -34,11 +35,30 @@ const loadParsed = (): CandidateRow[] => {
   }
 };
 
+type StoredMatch = MatchResult & { roleId: string; roleTitle: string };
+
+const loadMatches = (): Record<string, StoredMatch> => {
+  if (typeof window === "undefined") return {};
+  try {
+    return JSON.parse(localStorage.getItem(MATCHES_KEY) || "{}");
+  } catch {
+    return {};
+  }
+};
+
 const SOURCES = [
   { id: "linkedin", label: "LinkedIn Recruiter" },
   { id: "jobstreet", label: "JobStreet" },
   { id: "any", label: "Any Sourcing Tab" },
 ] as const;
+
+/** Fill color follows the rate bands: green 76+, yellow 51-75, orange 26-50, red below. */
+function rateColorClass(score: number): string {
+  if (score >= 76) return "bg-emerald-500";
+  if (score >= 51) return "bg-yellow-400";
+  if (score >= 26) return "bg-orange-400";
+  return "bg-red-500";
+}
 
 const sourceMatches = (url: string, source: string) => {
   const u = url.toLowerCase();
@@ -73,6 +93,13 @@ export default function HuntAutomation() {
   const [showSaved, setShowSaved] = useState(false);
   const [viewing, setViewing] = useState<CandidateProfileResult | null>(null);
   const [clearOpen, setClearOpen] = useState(false);
+
+  // "View Match" — opens the same RoleDetailsModal used in the Job Description tab.
+  const [viewMatch, setViewMatch] = useState<{
+    role: RoleRow;
+    candidate: CandidateRow;
+    match: MatchResult;
+  } | null>(null);
 
   // Multi-select of parsed candidates + saving them to the database.
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -131,6 +158,7 @@ export default function HuntAutomation() {
     }
     setParsed([]);
     setSaved([]);
+    setMatches({});
     setPhase("idle");
     setClearOpen(false);
   };
@@ -176,23 +204,33 @@ export default function HuntAutomation() {
   };
 
   // Per-candidate match results (localStorage only — not written to the DB).
+  const [matches, setMatches] = useState<Record<string, StoredMatch>>(() => loadMatches());
+
   const addMatch = (
     candidateId: string,
     roleId: string,
     roleTitle: string,
     match: MatchResult
   ) => {
+    const next = { ...matches, [candidateId]: { ...match, roleId, roleTitle } };
+    setMatches(next);
     try {
-      const prev = JSON.parse(localStorage.getItem(MATCHES_KEY) || "{}") as Record<
-        string,
-        MatchResult & { roleId: string; roleTitle: string }
-      >;
-      const next = { ...prev, [candidateId]: { ...match, roleId, roleTitle } };
       localStorage.setItem(MATCHES_KEY, JSON.stringify(next));
     } catch {
       /* storage unavailable */
     }
   };
+
+  // Match scores for the currently selected role, keyed by candidate id.
+  // Drives the progress bar shown in the Candidate column of the table.
+  const matchScores = useMemo(() => {
+    if (!roleId) return {};
+    const map: Record<string, number> = {};
+    for (const [candidateId, m] of Object.entries(matches)) {
+      if (m.roleId === roleId) map[candidateId] = m.score;
+    }
+    return map;
+  }, [matches, roleId]);
 
   // Auto-scan the browser tabs + load job descriptions as soon as the
   // Hunt Automation tab is active.
@@ -582,6 +620,47 @@ export default function HuntAutomation() {
               selectedIds={selectedIds}
               onToggleRow={toggleRow}
               onToggleAll={toggleAll}
+              matchScores={matchScores}
+              detailFooter={(c) => {
+                const m = matches[c.id];
+                if (!m) return null;
+                const role = roles.find((r) => r.id === m.roleId) ?? null;
+                return (
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[13px] font-semibold tracking-wider text-gray-500 uppercase">
+                        Match Rate
+                      </p>
+                      <div className="mt-2 flex items-center gap-3">
+                        <span
+                          className={`h-2.5 w-2.5 shrink-0 rounded-full ${rateColorClass(m.score)}`}
+                        />
+                        <div className="h-2 min-w-[160px] max-w-[320px] flex-1 overflow-hidden rounded-full bg-gray-100 ring-1 ring-gray-200/60 ring-inset">
+                          <div
+                            className={`h-full rounded-full transition-[width] duration-500 ease-out ${rateColorClass(m.score)}`}
+                            style={{ width: `${m.score}%` }}
+                          />
+                        </div>
+                        <span className="font-bold text-gray-900 tabular-nums">{m.score}%</span>
+                      </div>
+                      <p className="mt-1.5 truncate text-xs text-gray-400">
+                        Matched against {m.roleTitle}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (role) setViewMatch({ role, candidate: c, match: m });
+                      }}
+                      disabled={!role}
+                      className="flex shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <ArrowSquareOut size={14} />
+                      View Match
+                    </button>
+                  </div>
+                );
+              }}
               actions={
                 <div className="flex shrink-0 items-center gap-2">
                   {saveMsg && (
@@ -655,6 +734,18 @@ export default function HuntAutomation() {
       {/* Detail of a saved candidate */}
       {viewing && (
         <CandidateProfileModal profile={viewing} onClose={() => setViewing(null)} />
+      )}
+
+      {/* View the job description + match (same modal as the Job Description tab) */}
+      {viewMatch && (
+        <RoleDetailsModal
+          role={viewMatch.role}
+          candidates={[viewMatch.candidate]}
+          match={viewMatch.match}
+          initialCandidate={viewMatch.candidate}
+          initialReport={viewMatch.match}
+          onClose={() => setViewMatch(null)}
+        />
       )}
 
       {/* Confirm clearing all local hunt data */}

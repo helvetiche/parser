@@ -12,7 +12,7 @@ type ModalProps = {
   onClose: () => void;
   /** While true, closing is blocked and the close button is disabled. */
   busy?: boolean;
-  size?: "sm" | "md" | "lg";
+  size?: "sm" | "md" | "lg" | "xl";
   /** Renders the panel as a flex column capped at 85vh; children supply their own scroll region. */
   scroll?: boolean;
   children: ReactNode;
@@ -22,6 +22,7 @@ const PANEL_SIZES = {
   sm: "max-w-sm",
   md: "max-w-md",
   lg: "max-w-4xl",
+  xl: "max-w-6xl",
 } as const;
 
 export default function Modal({

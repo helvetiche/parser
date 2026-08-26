@@ -14,11 +14,13 @@ import {
   NotePencil,
   Sliders,
   User,
+  UserPlus,
   XCircle,
 } from "@phosphor-icons/react";
 import { useMemo, useRef, useState, type ReactNode } from "react";
 import useSWR from "swr";
-import Modal, { ModalCloseButton } from "@/components/ui/Modal";
+import { ModalCloseButton } from "@/components/ui/Modal";
+import Drawer from "@/components/ui/Drawer";
 import DetailsSection, { EmptyValue } from "@/components/ui/DetailsSection";
 import TimelineList from "@/components/ui/TimelineList";
 import MatchBadge from "@/components/roles/MatchBadge";
@@ -91,16 +93,24 @@ export default function RoleDetailsModal({
   match,
   candidates,
   onClose,
+  onSubmitCandidates,
+  initialCandidate,
+  initialReport,
 }: {
   role: RoleRow;
   match?: MatchResult;
   candidates: CandidateRow[];
   onClose: () => void;
+  /** Opens the Submit Candidates modal (handled by the parent). */
+  onSubmitCandidates?: () => void;
+  /** Seed the candidate + report (used when opening straight from a match). */
+  initialCandidate?: CandidateRow;
+  initialReport?: MatchResult;
 }) {
   /* ---- In-modal candidate evaluation ---- */
-  const [lookup, setLookup] = useState<CandidateRow | null>(null);
-  const [report, setReport] = useState<MatchResult | null>(null);
-  const [stale, setStale] = useState(false);
+  const [lookup, setLookup] = useState<CandidateRow | null>(initialCandidate ?? null);
+  const [report, setReport] = useState<MatchResult | null>(initialReport ?? null);
+  const [stale, setStale] = useState(Boolean(initialReport));
   const [evaluating, setEvaluating] = useState(false);
   const [evalError, setEvalError] = useState<string | null>(null);
   const evalSeq = useRef(0);
@@ -181,7 +191,7 @@ export default function RoleDetailsModal({
   };
 
   return (
-    <Modal labelledBy="role-details-title" onClose={onClose} size="lg" scroll>
+    <Drawer labelledBy="role-details-title" onClose={onClose} size="lg">
       {/* Header */}
       <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-5">
         <div className="flex min-w-0 items-center gap-3.5">
@@ -202,7 +212,23 @@ export default function RoleDetailsModal({
             )}
           </div>
         </div>
-        <ModalCloseButton onClose={onClose} />
+        <div className="flex shrink-0 items-center gap-2">
+          {onSubmitCandidates && (
+            <button
+              onClick={onSubmitCandidates}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-b from-gray-700 to-gray-900 px-3.5 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98]"
+            >
+              <UserPlus size={16} weight="bold" />
+              Submit Candidates
+              {Object.keys(role.endorsements ?? {}).length > 0 && (
+                <span className="ml-0.5 rounded-full bg-white/20 px-1.5 py-0.5 text-xs font-semibold tabular-nums">
+                  {Object.keys(role.endorsements ?? {}).length}
+                </span>
+              )}
+            </button>
+          )}
+          <ModalCloseButton onClose={onClose} />
+        </div>
       </div>
 
       <div className="border-t border-gray-100" />
@@ -435,6 +461,6 @@ export default function RoleDetailsModal({
       </div>
 
       {promptManagerOpen && <PromptManagerModal onClose={() => setPromptManagerOpen(false)} />}
-    </Modal>
+    </Drawer>
   );
 }

@@ -16,10 +16,23 @@ export type SavedEvaluation = MatchResult & {
   evaluatedAt: string;
 };
 
+/** Lifecycle of a candidate submitted/endorsed for a role. */
+export type EndorsementStatus = "endorsed" | "interviewed" | "hired" | "rejected";
+
+/** A candidate submitted for a role, tracked through the hiring funnel. */
+export type Endorsement = {
+  candidateId: string;
+  candidateName: string;
+  status: EndorsementStatus;
+  addedAt: string;
+};
+
 export type RoleRow = RoleData & {
   id: string;
   /** Stored evaluations keyed by candidate id. */
   evaluations?: Record<string, SavedEvaluation>;
+  /** Submitted candidates keyed by candidate id. */
+  endorsements?: Record<string, Endorsement>;
 };
 
 export function roleFromUnknown(input: unknown): RoleData {
