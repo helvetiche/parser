@@ -129,6 +129,20 @@ function normalizeContacts(input: unknown): ContactItem[] {
   return out;
 }
 
+function dedupeSkills(skills: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of skills) {
+    const s = raw.trim();
+    if (!s) continue;
+    const key = s.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(s);
+  }
+  return out;
+}
+
 export function candidateFromUnknown(input: unknown): Candidate {
   const map = objectFromUnknown(input);
 
@@ -137,7 +151,7 @@ export function candidateFromUnknown(input: unknown): Candidate {
     summary: limitWords(toText(map.summary), SUMMARY_MAX_WORDS),
     education: toText(map.education),
     experience: toList(map.experience, /\r?\n|;/),
-    skills: toList(map.skills, /[,;]|\r?\n/),
+    skills: dedupeSkills(toList(map.skills, /[,;]|\r?\n/)),
     expectedSalary: toText(map.expectedSalary),
     reasoning: toText(map.reasoning),
     contacts: normalizeContacts(map.contacts),

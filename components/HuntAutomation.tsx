@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+/* eslint-disable react-hooks/set-state-in-effect -- phase timing state is derived from phase transitions */
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowSquareOut, CaretDown, Check, CircleNotch, CloudArrowUp, Eye, RocketLaunch, Target, Trash, WarningCircle } from "@phosphor-icons/react";
+import { ArrowSquareOut, CaretDown, Check, CircleNotch, Clock, CloudArrowUp, Eye, RocketLaunch, Sparkle, Target, Trash, Users, WarningCircle } from "@phosphor-icons/react";
 import { getIdToken } from "@/lib/auth";
 import Modal, { ModalCloseButton } from "@/components/ui/Modal";
 import CandidatesTable from "@/components/candidates/CandidatesTable";
@@ -25,6 +27,8 @@ type SavedCandidate = CandidateProfileResult & { savedAt: string };
 // Parsed candidate profiles + match results (localStorage only — not yet written to the DB).
 const PARSED_KEY = "hunt.parsedCandidates";
 const MATCHES_KEY = "hunt.matches";
+
+const SELECTED_ROLE_KEY = "hunt.selectedRoleId";
 
 const LIMIT_CANDIDATES_KEY = "hunt.maxCandidates";
 const LIMIT_PAGES_KEY = "hunt.maxPages";
@@ -91,6 +95,89 @@ export default function HuntAutomation() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [scrapeError, setScrapeError] = useState<string | null>(null);
+
+  // Timing per node + total automation time
+  const [timings, setTimings] = useState<Partial<Record<Phase, { start: number; end?: number; durationMs?: number }>>>({});
+  const [runStart, setRunStart] = useState<number | null>(null);
+  const prevPhaseRef = useRef<Phase>("idle");
+  // eslint-disable-next-line react-hooks/purity -- live tick for running timer
+  const [nowTick, setNowTick] = useState<number>(Date.now());
+  // Live tick for running phase timer
+  useEffect(() => {
+    if (!gathering) return;
+    const id = setInterval(() => setNowTick(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [gathering]);
+
+  const formatDuration = (ms?: number) => {
+    if (ms == null || !Number.isFinite(ms)) return "—";
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    const s = ms / 1000;
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const rs = (s % 60).toFixed(0);
+    return `${m}m ${rs}s`;
+  };
+
+  // Track phase transitions -> per-node timing
+  useEffect(() => {
+    const prev = prevPhaseRef.current;
+    const now = Date.now();
+    if (phase === "idle") {
+      setTimings({});
+      setRunStart(null);
+      prevPhaseRef.current = phase;
+      return;
+    }
+    // Starting a run
+    if (prev === "idle" && phase !== "done") {
+      setRunStart(now);
+      setTimings({ [phase]: { start: now } });
+      prevPhaseRef.current = phase;
+      return;
+    }
+    // Phase changed
+    if (prev !== phase) {
+      setTimings((prevTimings) => {
+        const next = { ...prevTimings };
+        // Close previous
+        if (prev !== "idle" && prev !== "done" && next[prev] && !next[prev]?.end) {
+          const start = next[prev]!.start;
+          next[prev] = { start, end: now, durationMs: now - start };
+        }
+        // Open new (if not done)
+        if (phase !== "done") {
+          if (!next[phase] || next[phase]?.end) {
+            next[phase] = { start: now };
+          }
+        } else if (phase === "done") {
+          // Close whatever was running and also cap total
+          for (const k of Object.keys(next) as Phase[]) {
+            if (next[k] && !next[k]!.end) {
+              const s = next[k]!.start;
+              next[k] = { start: s, end: now, durationMs: now - s };
+            }
+          }
+        }
+        return next;
+      });
+      prevPhaseRef.current = phase;
+    }
+  }, [phase]);
+
+  const totalDurationMs = useMemo(() => {
+    if (!runStart) return undefined;
+    if (phase === "done") {
+      const ends = Object.values(timings).map((t) => t?.end ?? 0);
+      const maxEnd = Math.max(...ends, 0);
+      if (maxEnd) return maxEnd - (runStart || maxEnd);
+    }
+    if (gathering) return nowTick - (runStart || nowTick);
+    if (timings["done"]?.durationMs != null) return timings["done"]?.durationMs;
+    // Fallback sum
+    const sum = Object.values(timings).reduce((acc, t) => acc + (t?.durationMs ?? 0), 0);
+    return sum || undefined;
+  }, [timings, phase, gathering, nowTick, runStart]);
 
   // Automation limits — control how many candidates/pages to scrape.
   // Persisted so the recruiter's preference survives reload.
@@ -194,12 +281,14 @@ export default function HuntAutomation() {
       localStorage.removeItem(PARSED_KEY);
       localStorage.removeItem(SAVED_KEY);
       localStorage.removeItem(MATCHES_KEY);
+      localStorage.removeItem(SELECTED_ROLE_KEY);
     } catch {
       /* ignore */
     }
     setParsed([]);
     setSaved([]);
     setMatches({});
+    setRoleId(null);
     setPhase("idle");
     setClearOpen(false);
   };
@@ -224,7 +313,22 @@ export default function HuntAutomation() {
   // Selected job description (role) for the Match step, plus the role list.
   const [roles, setRoles] = useState<RoleRow[]>([]);
   const [rolesLoading, setRolesLoading] = useState(false);
-  const [roleId, setRoleId] = useState<string | null>(null);
+  const [roleId, setRoleId] = useState<string | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const saved = localStorage.getItem(SELECTED_ROLE_KEY);
+      return saved || null;
+    } catch {
+      return null;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      if (roleId) localStorage.setItem(SELECTED_ROLE_KEY, roleId);
+      else localStorage.removeItem(SELECTED_ROLE_KEY);
+    } catch {}
+  }, [roleId]);
 
   const loadRoles = async () => {
     if (rolesLoading) return;
@@ -236,7 +340,14 @@ export default function HuntAutomation() {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
-      if (res.ok) setRoles((data.roles as RoleRow[]) ?? []);
+      if (res.ok) {
+        const fetched = (data.roles as RoleRow[]) ?? [];
+        setRoles(fetched);
+        // If saved roleId no longer exists, clear it
+        if (roleId && !fetched.some((r) => r.id === roleId)) {
+          setRoleId(null);
+        }
+      }
     } catch {
       /* non-blocking */
     } finally {
@@ -266,11 +377,16 @@ export default function HuntAutomation() {
 
   // Match scores for the currently selected role, keyed by candidate id.
   // Drives the progress bar shown in the Candidate column of the table.
+  // Persisted matches + selected role — row now shows after reload (previously roleId was lost).
   const matchScores = useMemo(() => {
-    if (!roleId) return {};
     const map: Record<string, number> = {};
     for (const [candidateId, m] of Object.entries(matches)) {
-      if (m.roleId === roleId) map[candidateId] = m.score;
+      if (roleId) {
+        if (m.roleId === roleId) map[candidateId] = m.score;
+      } else {
+        // No role selected (e.g. fresh reload before role re-hydrates) — show stored match so row not empty
+        map[candidateId] = m.score;
+      }
     }
     return map;
   }, [matches, roleId]);
@@ -324,7 +440,6 @@ export default function HuntAutomation() {
   // Auto-scan the browser tabs + load job descriptions as soon as the
   // Hunt Automation tab is active.
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     void scan();
     void loadRoles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -819,6 +934,10 @@ export default function HuntAutomation() {
             rolesLoading={rolesLoading}
             roleId={roleId}
             onSelectRole={setRoleId}
+            timings={timings}
+            totalDurationMs={totalDurationMs}
+            formatDuration={formatDuration}
+            nowTick={nowTick}
           />
           {/* Same table layout as the Candidates tab — parsed profiles from localStorage */}
           <div className="mt-4">
@@ -1171,6 +1290,10 @@ function SourcingPanel({
   rolesLoading,
   roleId,
   onSelectRole,
+  timings,
+  totalDurationMs,
+  formatDuration,
+  nowTick,
 }: {
   target: BrowserTab | null;
   phase: Phase;
@@ -1181,14 +1304,45 @@ function SourcingPanel({
   rolesLoading: boolean;
   roleId: string | null;
   onSelectRole: (id: string) => void;
+  timings: Partial<Record<Phase, { start: number; end?: number; durationMs?: number }>>;
+  totalDurationMs?: number;
+  formatDuration: (ms?: number) => string;
+  nowTick: number;
 }) {
-  // 8-step stepper status mapping (explicit pagination):
-  // 1 Open Tab — opening
-  // 2 Scrap candidates (whole page) — scraping
-  // 3 Scrap pagination (new) — paginating (move to next page when Step 2 done)
-  // 4-6 Open/Scrape/Close Profile — extracting
-  // 7 Parse AI — parsing
-  // 8 Match — matching
+  // Modern grouped stepper — 4 top-level nodes, Getting Candidates groups 5 sub-steps
+  const phaseOrder: Phase[] = useMemo(() => ["idle", "opening", "scraping", "paginating", "extracting", "parsing", "matching", "returning", "done"], []);
+  const orderIdx = useCallback((p: Phase) => phaseOrder.indexOf(p), [phaseOrder]);
+  const isAfter = useCallback((a: Phase, b: Phase) => orderIdx(a) > orderIdx(b), [orderIdx]);
+
+  const getPhaseDuration = useCallback(
+    (p: Phase) => {
+      const t = timings[p];
+      if (t?.durationMs != null) return t.durationMs;
+      if (t?.start && gathering && phase === p) return nowTick - t.start;
+      return undefined;
+    },
+    [timings, gathering, phase, nowTick]
+  );
+
+  const gettingPhases: Phase[] = useMemo(() => ["scraping", "paginating", "extracting"] as Phase[], []);
+  const gettingActive = gettingPhases.includes(phase);
+  const gettingDone = isAfter(phase, "extracting") || phase === "done" || phase === "returning" || phase === "parsing" || phase === "matching";
+  const gettingStatus: "done" | "active" | "upcoming" = gettingDone ? "done" : gettingActive ? "active" : "upcoming";
+  // Total for Getting Candidates = sum of its 3 phase durations (or live)
+  const gettingDuration = useMemo(() => {
+    let sum = 0;
+    let has = false;
+    for (const p of gettingPhases) {
+      const d = getPhaseDuration(p);
+      if (d != null) {
+        sum += d;
+        has = true;
+      }
+    }
+    return has ? sum : undefined;
+  }, [gettingPhases, getPhaseDuration]);
+
+  // Keep legacy stepStatus for old Stepper compatibility if needed, but new ModernStepper uses grouped logic
   const stepStatus = (idx: number): "done" | "active" | "upcoming" => {
     if (idx === 1) {
       if (!target) return "active";
@@ -1224,7 +1378,6 @@ function SourcingPanel({
         return "done";
       return "upcoming";
     }
-    // Steps 4-6 are the per-candidate open→scrape→close atomic loop (extracting)
     if (idx === 4 || idx === 5 || idx === 6) {
       if (phase === "scraping" || phase === "paginating" || phase === "opening" || phase === "idle") return "upcoming";
       if (phase === "extracting") return "active";
@@ -1244,37 +1397,174 @@ function SourcingPanel({
     return "upcoming";
   };
 
+  // Helpers for modern grouped stepper
+  const getDuration = (p: Phase) => getPhaseDuration(p);
+  const gettingDurationMs = gettingDuration;
+  const openDuration = getDuration("opening");
+  const parseDuration = getDuration("parsing");
+  const matchDuration = getDuration("matching");
+
   return (
     <div className="overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm backdrop-blur">
-      {/* Stepper on top, with job-description picker + Start action on the right */}
-      <div className="flex flex-col gap-4 border-b border-gray-100 px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
-        <Stepper statusFor={stepStatus} running={gathering} />
-        <div className="flex shrink-0 items-center gap-3">
-          {/* Custom job-description dropdown (left of Start) */}
-          <RoleDropdown
-            roles={roles}
-            loading={rolesLoading}
-            roleId={roleId}
-            onSelectRole={onSelectRole}
-          />
-          <button
-            type="button"
-            onClick={onStart}
-            disabled={gathering || !target}
-            className="flex items-center gap-2 rounded-xl bg-gradient-to-b from-gray-700 to-gray-900 px-5 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {gathering ? (
-              <>
-                <CircleNotch size={17} className="animate-spin" />
-                Running…
-              </>
-            ) : (
-              <>
-                <RocketLaunch size={17} weight="fill" />
-                Start Hunt Automation
-              </>
-            )}
-          </button>
+      {/* Header: Pipeline title + total time + controls */}
+      <div className="flex flex-col gap-3 border-b border-gray-100 px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-semibold tracking-tight text-gray-900">Automation Pipeline</h3>
+            <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-900 px-2.5 py-1 text-xs font-medium text-white">
+              <Clock size={12} weight="fill" />
+              {totalDurationMs != null ? formatDuration(totalDurationMs) : "—"} total
+            </span>
+            {gathering && <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />}
+          </div>
+          <div className="flex shrink-0 items-center gap-3">
+            <RoleDropdown roles={roles} loading={rolesLoading} roleId={roleId} onSelectRole={onSelectRole} />
+            <button
+              type="button"
+              onClick={onStart}
+              disabled={gathering || !target}
+              className="flex items-center gap-2 rounded-xl bg-gradient-to-b from-gray-700 to-gray-900 px-5 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {gathering ? (
+                <>
+                  <CircleNotch size={17} className="animate-spin" />
+                  Running…
+                </>
+              ) : (
+                <>
+                  <RocketLaunch size={17} weight="fill" />
+                  Start Hunt Automation
+                </>
+              )}
+            </button>
+          </div>
+        </div>
+
+        {/* n8n linear stepper — 4 nodes, Getting Candidates is single process with 5 sub-steps */}
+        <div className="relative pt-2">
+          {/* Linear connector — n8n style */}
+          <div className="absolute left-6 right-6 top-[26px] hidden h-0.5 bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 sm:block" aria-hidden />
+          <div className="absolute bottom-6 left-6 top-[26px] w-0.5 bg-gradient-to-b from-gray-200 to-gray-300 sm:hidden" aria-hidden />
+
+          <div className="relative flex flex-col gap-4 sm:flex-row sm:items-stretch sm:gap-3">
+            {/* 1. Open Tab — n8n Trigger Node — content top-aligned */}
+            <div className="relative flex flex-1 flex-col gap-2">
+              <div className={`flex flex-1 items-start gap-3 rounded-xl border bg-white px-3 py-3 shadow-sm transition-all ${phase === "opening" ? "border-[#ff6d5a] shadow-md ring-2 ring-[#ff6d5a]/20" : orderIdx(phase) > orderIdx("opening") ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
+                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border-2 ${phase === "opening" ? "border-[#ff6d5a] bg-[#ff6d5a] text-white" : orderIdx(phase) > orderIdx("opening") ? "border-emerald-500 bg-emerald-500 text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
+                  {orderIdx(phase) > orderIdx("opening") ? <Check size={16} weight="bold" /> : phase === "opening" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Target size={16} weight="fill" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className={`truncate text-sm font-semibold ${phase === "opening" ? "text-gray-900" : orderIdx(phase) > orderIdx("opening") ? "text-emerald-900" : "text-gray-700"}`}>Open Tab</div>
+                  <div className="flex items-center gap-1.5">
+                    <Clock size={10} className="text-gray-400" />
+                    <span className="text-xs tabular-nums text-gray-500">{formatDuration(openDuration)}</span>
+                    {phase === "opening" && gathering && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff6d5a]" />}
+                  </div>
+                </div>
+                <div className={`hidden h-2 w-2 shrink-0 rounded-full sm:block mt-4 ${phase === "opening" ? "bg-[#ff6d5a] animate-pulse" : orderIdx(phase) > orderIdx("opening") ? "bg-emerald-500" : "bg-gray-200"}`} />
+              </div>
+              <div className="hidden justify-center sm:flex">
+                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">1</span>
+              </div>
+            </div>
+
+            {/* 2. Getting Candidates — n8n grouped node (single process, 5 sub-nodes linear inside) */}
+            <div className="relative flex flex-[2] flex-col gap-2">
+              <div className={`flex flex-1 flex-col justify-center rounded-xl border bg-white p-3 shadow-sm transition-all ${gettingStatus === "active" ? "border-[#ff6d5a] shadow-md ring-2 ring-[#ff6d5a]/20" : gettingStatus === "done" ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className={`flex h-10 w-10 items-center justify-center rounded-lg border-2 ${gettingStatus === "done" ? "border-emerald-500 bg-emerald-500 text-white" : gettingStatus === "active" ? "border-[#ff6d5a] bg-[#ff6d5a] text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
+                      {gettingStatus === "done" ? <Check size={16} weight="bold" /> : gettingStatus === "active" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Users size={16} weight="fill" />}
+                    </div>
+                    <div>
+                      <div className={`text-sm font-semibold ${gettingStatus === "active" ? "text-gray-900" : gettingStatus === "done" ? "text-emerald-900" : "text-gray-700"}`}>Getting Candidates</div>
+                      <div className="flex items-center gap-1.5">
+                        <Clock size={10} className="text-gray-400" />
+                        <span className="text-xs tabular-nums text-gray-500">{formatDuration(gettingDurationMs)}</span>
+                        {gettingStatus === "active" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff6d5a]" />}
+                      </div>
+                    </div>
+                  </div>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${gettingStatus === "done" ? "bg-emerald-500 text-white" : gettingStatus === "active" ? "bg-[#ff6d5a] text-white" : "bg-gray-100 text-gray-500"}`}>5 steps</span>
+                </div>
+                {/* n8n sub-pipeline — linear 5 nodes */}
+                <div className="relative mt-3 flex items-center gap-1 rounded-lg border border-dashed border-gray-200 bg-gray-50/70 p-2">
+                  <div className="absolute left-4 right-4 top-1/2 hidden h-px -translate-y-1/2 bg-gray-200 sm:block" aria-hidden />
+                  {[
+                    { label: "Scrap\ncandidates", phase: "scraping" as Phase },
+                    { label: "Scrap\npagination", phase: "paginating" as Phase },
+                    { label: "Open\nprofile", phase: "extracting" as Phase },
+                    { label: "Scrape\nprofile", phase: "extracting" as Phase },
+                    { label: "Close\ntab", phase: "extracting" as Phase },
+                  ].map((sub, i) => {
+                    const subDuration = getDuration(sub.phase);
+                    const isActive = phase === sub.phase;
+                    const done = sub.phase === "extracting" ? isAfter(phase, "extracting") || phase === "parsing" || phase === "matching" || phase === "returning" || phase === "done" : isAfter(phase, sub.phase);
+                    const active = sub.phase === "extracting" ? phase === "extracting" : isActive;
+                    return (
+                      <div key={sub.label + i} className="relative flex flex-1 flex-col items-center gap-1">
+                        <div className={`relative z-10 flex h-7 w-7 items-center justify-center rounded-full border-2 bg-white text-[11px] font-bold shadow-sm ${done ? "border-emerald-500 bg-emerald-500 text-white" : active ? "border-[#ff6d5a] bg-[#ff6d5a] text-white" : "border-gray-200 bg-white text-gray-400"}`}>
+                          {done ? "✓" : active && gathering ? <CircleNotch size={12} className="animate-spin" /> : i + 1}
+                        </div>
+                        <span className={`whitespace-pre text-center text-[10px] font-medium leading-tight ${active ? "text-gray-900" : done ? "text-emerald-800" : "text-gray-500"}`}>{sub.label}</span>
+                        <span className="text-[10px] tabular-nums text-gray-400">{formatDuration(subDuration)}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              <div className="hidden justify-center sm:flex">
+                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">2</span>
+              </div>
+            </div>
+
+            {/* 3. Parse AI — n8n AI Node — content top-aligned */}
+            <div className="relative flex flex-1 flex-col gap-2">
+              <div className={`flex flex-1 items-start gap-3 rounded-xl border bg-white px-3 py-3 shadow-sm transition-all ${phase === "parsing" ? "border-[#8b5cf6] shadow-md ring-2 ring-[#8b5cf6]/20" : orderIdx(phase) > orderIdx("parsing") ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
+                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border-2 ${phase === "parsing" ? "border-[#8b5cf6] bg-[#8b5cf6] text-white" : orderIdx(phase) > orderIdx("parsing") ? "border-emerald-500 bg-emerald-500 text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
+                  {orderIdx(phase) > orderIdx("parsing") ? <Check size={16} weight="bold" /> : phase === "parsing" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Sparkle size={16} weight="fill" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className={`truncate text-sm font-semibold ${phase === "parsing" ? "text-gray-900" : orderIdx(phase) > orderIdx("parsing") ? "text-emerald-900" : "text-gray-700"}`}>Parse AI</div>
+                  <div className="flex items-center gap-1.5">
+                    <Clock size={10} className="text-gray-400" />
+                    <span className="text-xs tabular-nums text-gray-500">{formatDuration(parseDuration)}</span>
+                    {phase === "parsing" && gathering && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#8b5cf6]" />}
+                  </div>
+                </div>
+                <div className={`hidden h-2 w-2 shrink-0 rounded-full sm:block mt-4 ${phase === "parsing" ? "bg-[#8b5cf6] animate-pulse" : orderIdx(phase) > orderIdx("parsing") ? "bg-emerald-500" : "bg-gray-200"}`} />
+              </div>
+              <div className="hidden justify-center sm:flex">
+                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">3</span>
+              </div>
+            </div>
+
+            {/* 4. Match — n8n Output Node — content top-aligned */}
+            <div className="relative flex flex-1 flex-col gap-2">
+              <div className={`flex flex-1 items-start gap-3 rounded-xl border bg-white px-3 py-3 shadow-sm transition-all ${phase === "matching" ? "border-gray-900 shadow-md ring-2 ring-gray-900/10" : orderIdx(phase) > orderIdx("matching") ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
+                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border-2 ${phase === "matching" ? "border-gray-900 bg-gray-900 text-white" : orderIdx(phase) > orderIdx("matching") ? "border-emerald-500 bg-emerald-500 text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
+                  {orderIdx(phase) > orderIdx("matching") ? <Check size={16} weight="bold" /> : phase === "matching" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Check size={16} weight="bold" />}
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className={`truncate text-sm font-semibold ${phase === "matching" ? "text-gray-900" : orderIdx(phase) > orderIdx("matching") ? "text-emerald-900" : "text-gray-700"}`}>Match</div>
+                  <div className="flex items-center gap-1.5">
+                    <Clock size={10} className="text-gray-400" />
+                    <span className="text-xs tabular-nums text-gray-500">{formatDuration(matchDuration)}</span>
+                    {phase === "matching" && gathering && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-900" />}
+                  </div>
+                </div>
+                <div className={`hidden h-2 w-2 shrink-0 rounded-full sm:block mt-4 ${phase === "matching" ? "bg-gray-900 animate-pulse" : orderIdx(phase) > orderIdx("matching") ? "bg-emerald-500" : "bg-gray-200"}`} />
+              </div>
+              <div className="hidden justify-center sm:flex">
+                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">4</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Legacy horizontal stepper kept hidden for a11y - grouped view is primary */}
+        <div className="hidden">
+          <Stepper statusFor={stepStatus} running={gathering} />
         </div>
       </div>
 

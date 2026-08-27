@@ -70,22 +70,24 @@ function columnWidthClass(key: ColumnKey): string {
 
 function SkillsCell({ skills }: { skills: string[] }) {
   if (skills.length === 0) return <span className="text-xs text-gray-300">N/A</span>;
+  // Dedupe (AI can return duplicate skills like "Incident Response" twice) and keep key unique
+  const unique = [...new Set(skills.map((s) => s.trim()).filter(Boolean))];
   return (
     <div className="flex flex-wrap items-center justify-start gap-1.5">
-      {skills.slice(0, MAX_SKILLS).map((skill) => (
+      {unique.slice(0, MAX_SKILLS).map((skill, i) => (
         <span
-          key={skill}
+          key={`${skill}-${i}`}
           className="rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700 ring-1 ring-gray-200/80 transition-colors ring-inset hover:bg-gray-200/70"
         >
           {skill}
         </span>
       ))}
-      {skills.length > MAX_SKILLS && (
+      {unique.length > MAX_SKILLS && (
         <span
           className="rounded-full bg-gradient-to-b from-gray-700 to-gray-900 px-2.5 py-1 text-xs font-semibold text-white shadow-sm"
-          title={skills.slice(MAX_SKILLS).join(", ")}
+          title={unique.slice(MAX_SKILLS).join(", ")}
         >
-          {skills.length - MAX_SKILLS}+ Skills
+          {unique.length - MAX_SKILLS}+ Skills
         </span>
       )}
     </div>
