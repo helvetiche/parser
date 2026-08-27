@@ -4,6 +4,7 @@ import {
   extractCandidateProfile,
   focusBrowserTab,
   listBrowserTabs,
+  returnToScrapePage,
   scrapeCandidates,
 } from "@/lib/hunt/automation";
 import { listRoles } from "@/lib/firestore-server";
@@ -17,30 +18,57 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
 
-    // Step 1 of the automation: focus a chosen sourcing tab.
+    // STEP 1 — Open tab (bring chosen sourcing tab to foreground).
     if (typeof body?.open === "string" && body.open) {
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
       const result = await focusBrowserTab(body.open, endpoint);
       return NextResponse.json(result);
     }
 
-    // Step 2 of the automation: scrape candidate names + links.
+    // STEP 2 — Scrape all candidate names + pagination.
+    // Accepts optional maxPages (1..50) and maxCandidates (1..500) to bound traversal.
     if (typeof body?.scrape === "string" && body.scrape) {
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
-      const result = await scrapeCandidates(body.scrape, endpoint);
+      const maxPages =
+        typeof body?.maxPages === "number" && Number.isFinite(body.maxPages)
+          ? Math.max(1, Math.min(Math.floor(body.maxPages), 50))
+          : undefined;
+      const maxCandidates =
+        typeof body?.maxCandidates === "number" && Number.isFinite(body.maxCandidates)
+          ? Math.max(1, Math.min(Math.floor(body.maxCandidates), 500))
+          : undefined;
+      const opts: { maxPages?: number; maxCandidates?: number } = {};
+      if (maxPages !== undefined) opts.maxPages = maxPages;
+      if (maxCandidates !== undefined) opts.maxCandidates = maxCandidates;
+      const result = await scrapeCandidates(body.scrape, endpoint, opts);
       return NextResponse.json(result);
     }
 
-    // Step 3 of the automation: open a candidate and extract their profile.
+    // STEPS 3-5 — Open each candidate's profile → scrape them → close it.
+    // Strict lifecycle: a dedicated background tab is created, navigated,
+    // scraped, then guaranteed closed before the next candidate is processed.
+    // The route is called once per candidate; batching + close guarantees are
+    // enforced server-side in extractCandidateProfile (lib/hunt/automation.ts:extractCandidateProfile).
     if (typeof body?.extract === "string" && body.extract) {
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
       const result = await extractCandidateProfile(body.extract, endpoint);
       return NextResponse.json(result);
     }
 
-    // Step 5 of the automation: match a (local) parsed candidate to a stored
-    // job description. The candidate is NOT written to the DB — only the
-    // computed MatchResult is returned.
+    // Post-STEP 7 — Return to the original scrap candidate page (search/project).
+    // Called after matching completes; navigates the sourcing tab back to the
+    // initial list URL so the recruiter isn't left on the last pagination page.
+    // Respects the pages slider: if 3 pages were scraped, we still return to page 1.
+    if (typeof body?.returnToScrape === "string" && body.returnToScrape) {
+      const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
+      const result = await returnToScrapePage(body.returnToScrape, endpoint);
+      return NextResponse.json(result);
+    }
+
+    // STEP 7 — Match a (local) parsed candidate to a stored job description.
+    // Batch match runs *after* STEP 6 (AI parse of all raws) completes, so
+    // no scraping state is held during LLM calls. The candidate is NOT written
+    // to the DB — only the computed MatchResult is returned.
     if (body?.match && typeof body.match === "object") {
       const { candidate, roleId } = body.match as { candidate?: unknown; roleId?: string };
       if (!candidate || !roleId) {

@@ -26,6 +26,18 @@ type SavedCandidate = CandidateProfileResult & { savedAt: string };
 const PARSED_KEY = "hunt.parsedCandidates";
 const MATCHES_KEY = "hunt.matches";
 
+const LIMIT_CANDIDATES_KEY = "hunt.maxCandidates";
+const LIMIT_PAGES_KEY = "hunt.maxPages";
+const DEFAULT_MAX_CANDIDATES = 25;
+const DEFAULT_MAX_PAGES = 5;
+// Slider bounds — hitting the upper bound means "unlimited" (ellipsis / ∞)
+const CANDIDATES_MAX = 100;
+const PAGES_MAX = 20;
+const CANDIDATES_UNLIMITED = CANDIDATES_MAX;
+const PAGES_UNLIMITED = PAGES_MAX;
+const BACKEND_MAX_CANDIDATES = 500;
+const BACKEND_MAX_PAGES = 50;
+
 const loadParsed = (): CandidateRow[] => {
   if (typeof window === "undefined") return [];
   try {
@@ -46,12 +58,6 @@ const loadMatches = (): Record<string, StoredMatch> => {
   }
 };
 
-const SOURCES = [
-  { id: "linkedin", label: "LinkedIn Recruiter" },
-  { id: "jobstreet", label: "JobStreet" },
-  { id: "any", label: "Any Sourcing Tab" },
-] as const;
-
 /** Fill color follows the rate bands: green 76+, yellow 51-75, orange 26-50, red below. */
 function rateColorClass(score: number): string {
   if (score >= 76) return "bg-emerald-500";
@@ -60,26 +66,60 @@ function rateColorClass(score: number): string {
   return "bg-red-500";
 }
 
-const sourceMatches = (url: string, source: string) => {
-  const u = url.toLowerCase();
-  if (source === "linkedin") return u.includes("linkedin");
-  if (source === "jobstreet") return u.includes("jobstreet");
-  return true;
-};
-
-type Phase = "idle" | "opening" | "gathering" | "parsing" | "matching" | "done";
+/**
+ * Revamped 7-step pipeline:
+ *  1. opening    — STEP 1: open tab (focusBrowserTab / bringToFront)
+ *  2. scraping   — STEP 2: scrape all candidate names + pagination (scrapeCandidates)
+ *  3-5. extracting — STEPS 3-5: for each candidate: open profile → scrape raw → close tab
+ *                  (extractCandidateProfile guarantees open/scrape/close per candidate)
+ *  6. parsing    — STEP 6: batch AI parse of ALL raws (parseProfile) — no interleaving
+ *  7. matching   — STEP 7: batch match each parsed candidate to role (matchCandidateToRole)
+ */
+type Phase = "idle" | "opening" | "scraping" | "extracting" | "parsing" | "matching" | "returning" | "done";
 
 export default function HuntAutomation() {
   const [scanning, setScanning] = useState(false);
   const [result, setResult] = useState<BrowserTabsResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [source, setSource] = useState<string>("linkedin");
+  // The specific browser tab the user wants to harvest (URL). Defaults to the
+  // first detected sourcing tab until the user picks one from the dropdown.
+  const [selectedTabUrl, setSelectedTabUrl] = useState<string | null>(null);
 
   // The selected sourcing tab (derived from the matching source) + the run.
   const [gathering, setGathering] = useState(false);
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [scrapeError, setScrapeError] = useState<string | null>(null);
+
+  // Automation limits — control how many candidates/pages to scrape.
+  // Persisted so the recruiter's preference survives reload.
+  // Hitting the slider's max (100 candidates / 20 pages) is treated as unlimited (∞ / …).
+  const [maxCandidates, setMaxCandidates] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_MAX_CANDIDATES;
+    try {
+      const v = Number(localStorage.getItem(LIMIT_CANDIDATES_KEY));
+      if (Number.isFinite(v) && v >= 5 && v <= CANDIDATES_MAX) return Math.round(v);
+    } catch {}
+    return DEFAULT_MAX_CANDIDATES;
+  });
+  const [maxPages, setMaxPages] = useState<number>(() => {
+    if (typeof window === "undefined") return DEFAULT_MAX_PAGES;
+    try {
+      const v = Number(localStorage.getItem(LIMIT_PAGES_KEY));
+      if (Number.isFinite(v) && v >= 1 && v <= PAGES_MAX) return Math.round(v);
+    } catch {}
+    return DEFAULT_MAX_PAGES;
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(LIMIT_CANDIDATES_KEY, String(maxCandidates));
+    } catch {}
+  }, [maxCandidates]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(LIMIT_PAGES_KEY, String(maxPages));
+    } catch {}
+  }, [maxPages]);
 
   // Persisted scraped candidates (localStorage) + the view-saved modal.
   const [saved, setSaved] = useState<SavedCandidate[]>(() => {
@@ -212,13 +252,15 @@ export default function HuntAutomation() {
     roleTitle: string,
     match: MatchResult
   ) => {
-    const next = { ...matches, [candidateId]: { ...match, roleId, roleTitle } };
-    setMatches(next);
-    try {
-      localStorage.setItem(MATCHES_KEY, JSON.stringify(next));
-    } catch {
-      /* storage unavailable */
-    }
+    setMatches((prev) => {
+      const next = { ...prev, [candidateId]: { ...match, roleId, roleTitle } };
+      try {
+        localStorage.setItem(MATCHES_KEY, JSON.stringify(next));
+      } catch {
+        /* storage unavailable */
+      }
+      return next;
+    });
   };
 
   // Match scores for the currently selected role, keyed by candidate id.
@@ -231,16 +273,6 @@ export default function HuntAutomation() {
     }
     return map;
   }, [matches, roleId]);
-
-  // Auto-scan the browser tabs + load job descriptions as soon as the
-  // Hunt Automation tab is active.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/immutability
-    void scan();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadRoles();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
 
   const addSaved = (p: CandidateProfileResult) => {
     setSaved((prev) => {
@@ -288,7 +320,23 @@ export default function HuntAutomation() {
     }
   };
 
-  /** Scrape candidate names + links from the selected tab. */
+  // Auto-scan the browser tabs + load job descriptions as soon as the
+  // Hunt Automation tab is active.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void scan();
+    void loadRoles();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /**
+   * STEP 2 — Scrape all candidate names + pagination.
+   * Server-side (lib/hunt/automation.ts:scrapeCandidates) scrolls the sourcing
+   * tab, collects deduplicated profile URLs (sliced to maxCandidates PER PAGE),
+   * clicks "Next" pagination controls and repeats up to maxPages (multiplier).
+   * total = perPage * pages. The full list is returned before any profile
+   * is opened (steps 3-5).
+   */
   const doScrape = async (): Promise<ScrapedCandidate[]> => {
     if (!selectedUrl) {
       setScrapeError("Select a tab first.");
@@ -298,13 +346,22 @@ export default function HuntAutomation() {
     try {
       const token = await getIdToken();
       if (!token) throw new Error("You are signed out. Please sign in again.");
+      // Slider at max → unlimited: map to backend hard caps (effectively no limit)
+      const effectiveMaxPages = maxPages >= PAGES_UNLIMITED ? BACKEND_MAX_PAGES : maxPages;
+      const effectiveMaxCandidates =
+        maxCandidates >= CANDIDATES_UNLIMITED ? BACKEND_MAX_CANDIDATES : maxCandidates;
       const res = await fetch("/api/hunt", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ scrape: selectedUrl }),
+        body: JSON.stringify({
+          scrape: selectedUrl,
+          maxPages: effectiveMaxPages,
+          maxCandidates: effectiveMaxCandidates,
+        }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "Failed to scrape candidates");
+      // Optional debug: pagesScraped / hasMorePages are available on data.debug
       return data.candidates as ScrapedCandidate[];
     } catch (err) {
       setScrapeError(err instanceof Error ? err.message : "Failed to scrape candidates");
@@ -312,7 +369,15 @@ export default function HuntAutomation() {
     }
   };
 
-  /** Step 3: open each profile and collect the raw details (no parse yet). */
+  /**
+   * STEPS 3-5 — Open each candidate's profile → Scrape them → Close it.
+   * Strict per-candidate lifecycle enforced server-side:
+   *   extractCandidateProfile (automation.ts) creates a dedicated background tab,
+   *   navigates, scrolls, extracts raw, then GUARANTEES close() before next
+   *   candidate. This loop simply iterates the candidate list sequentially,
+   *   persisting each raw profile to localStorage (SavedCandidate) so progress
+   *   survives refresh and STEP 6 can batch-parse afterwards.
+   */
   const gatherRaw = async (list: ScrapedCandidate[]): Promise<CandidateProfileResult[]> => {
     const out: CandidateProfileResult[] = [];
     let remaining = [...list];
@@ -333,7 +398,7 @@ export default function HuntAutomation() {
           addSaved(profile);
           out.push(profile);
         } catch {
-          /* skip unreadable candidate and keep moving */
+          /* skip unreadable candidate and keep moving — guarantees close() already ran server-side */
         }
         remaining = remaining.slice(1);
         setProgress({ done: list.length - remaining.length, total: list.length });
@@ -344,7 +409,12 @@ export default function HuntAutomation() {
     return out;
   };
 
-  /** Step 4: convert each scraped profile into a structured candidate via AI. */
+  /**
+   * STEP 6 — Parse all scraped profiles using AI (batch, after ALL raws collected).
+   * Isolated from browser automation so CDP is not held during LLM calls.
+   * Each raw is sent to the AI fleet (lib/hunt/parse-profile → extractCandidateFromText)
+   * with fallback minimal row on model failure; results persisted to localStorage.
+   */
   const parseAll = async (profiles: CandidateProfileResult[]): Promise<CandidateRow[]> => {
     const rows: CandidateRow[] = [];
     let remaining = [...profiles];
@@ -384,7 +454,12 @@ export default function HuntAutomation() {
     }
   };
 
-  /** Step 5: match every parsed candidate to the chosen job description. */
+  /**
+   * STEP 7 — Match every parsed candidate to the chosen job description.
+   * Runs batch AFTER STEP 6 completes; each candidate is scored via
+   * matchCandidateToRole (strict Tech Recruiter instructions) and persisted to
+   * localStorage matches. No DB write until user explicitly "Save to Database".
+   */
   const matchAll = async (rows: CandidateRow[], role: RoleRow | null) => {
     if (!role) return;
     let remaining = [...rows];
@@ -410,7 +485,11 @@ export default function HuntAutomation() {
     }
   };
 
-  /** Focus/open the given browser tab (via CDP, does not open a new one). */
+  /**
+   * STEP 1 — Open tab (bring sourcing tab to foreground).
+   * Isolated so scraping starts on a visible, focused tab — required for
+   * reliable pagination clicks and lazy-load scroll in STEP 2.
+   */
   const openTab = async (url: string) => {
     try {
       const token = await getIdToken();
@@ -423,44 +502,122 @@ export default function HuntAutomation() {
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "Failed to open tab");
     } catch {
-      /* non-blocking — the dropdown stays usable */
+      /* non-blocking — scrape still attempts, focus is best-effort */
     }
   };
 
-  /** The one button: step 2 (open) → step 3 (gather) → step 4 (parse). */
+  /**
+   * Post-STEP 7 — Return to the original scrap candidate page.
+   * After matching, the sourcing tab is left on the last pagination page.
+   * This navigates it back to the initial search/project URL so the recruiter
+   * lands back on the list. Respects pages slider: if 3 pages were scraped,
+   * we still return to page 1. Non-blocking — failures are ignored.
+   */
+  const returnToScrape = async (url: string) => {
+    try {
+      const token = await getIdToken();
+      if (!token) return;
+      await fetch("/api/hunt", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ returnToScrape: url }),
+      });
+    } catch {
+      /* non-blocking — done state already reached */
+    }
+  };
+
+  /**
+   * Orchestrator for the revamped 7-step pipeline:
+   *  1. open tab          → focusBrowserTab
+   *  2. scrape + paginate → scrapeCandidates (deduplicated full list)
+   *  3-5. open/scrape/close per candidate → gatherRaw loop (strict lifecycle)
+   *  6. parse with AI     → parseAll (batch after all raws collected)
+   *  7. match candidate   → matchAll (batch after parsing)
+   */
   const gatherCandidates = async () => {
     if (gathering || !selectedUrl) return;
     setGathering(true);
     setScrapeError(null);
     setProgress(null);
     try {
+      // STEP 1 — Open tab
       setPhase("opening");
+      await openTab(selectedUrl);
+
+      // STEP 2 — Scrape all candidate names + pagination (capped by sliders)
+      setPhase("scraping");
       const list = await doScrape();
       if (list.length === 0) {
         setPhase("idle");
         return;
       }
-      setPhase("gathering");
-      const profiles = await gatherRaw(list);
+      // Slider guard — candidate slider is PER PAGE, pages is multiplier
+      // total = perPage * pages. Backend already slices per-page, but enforce
+      // total cap deterministically for safety.
+      // Unlimited per-page (∞) or unlimited pages (∞) → no total slicing.
+      const totalCap =
+        maxCandidates >= CANDIDATES_UNLIMITED || maxPages >= PAGES_UNLIMITED
+          ? Infinity
+          : maxCandidates * maxPages;
+      const cappedList = Number.isFinite(totalCap) ? list.slice(0, totalCap) : list;
+
+      // STEPS 3-5 — Open each profile → scrape → close (sequential, guaranteed close)
+      setPhase("extracting");
+      const profiles = await gatherRaw(cappedList);
+
+      // STEP 6 — Parse all scraped profiles with AI (batch)
       setPhase("parsing");
       const rows = await parseAll(profiles);
+
+      // STEP 7 — Match candidates to selected role
       setPhase("matching");
       const role = roles.find((r) => r.id === roleId) ?? null;
       await matchAll(rows, role);
+
+      // Post-7 — Return to scrap candidate page (based on pages slider)
+      // After matching, navigate the sourcing tab back to its original search
+      // URL so pagination respects the configured maxPages and the recruiter
+      // isn't left on the last page.
+      setPhase("returning");
+      await returnToScrape(selectedUrl);
+
       setPhase("done");
     } finally {
       setGathering(false);
     }
   };
 
-  // Filter the scanned tabs to the chosen automation source.
-  const visibleResult = useMemo<BrowserTabsResult | null>(() => {
-    if (!result) return null;
-    return { ...result, tabs: result.tabs.filter((t) => sourceMatches(t.url, source)) };
-  }, [result, source]);
+  // The tab we actually harvest. The user picks the exact tab (e.g. the Talent
+  // "Solution" tab) from the dropdown. LinkedIn rewrites its URL constantly
+  // (tracking params/hash), so we match tolerantly on host+pathname, not the
+  // raw string. When nothing is explicitly chosen we prefer a LinkedIn tab over
+  // JobStreet, and never silently fall back to tabs[0].
+  const target = useMemo<BrowserTab | null>(() => {
+    if (!result || result.tabs.length === 0) return null;
 
-  // Auto-pick the first matching tab as the gather target (no manual table).
-  const target = visibleResult?.tabs[0] ?? null;
+    const norm = (u: string) => {
+      try {
+        const x = new URL(u);
+        return x.host.replace(/^www\./, "") + x.pathname.replace(/\/$/, "");
+      } catch {
+        return u;
+      }
+    };
+
+    if (selectedTabUrl) {
+      const exact = result.tabs.find((t) => t.url === selectedTabUrl);
+      if (exact) return exact;
+      const want = norm(selectedTabUrl);
+      const near = result.tabs.find((t) => norm(t.url) === want);
+      if (near) return near;
+    }
+
+    const linkedin = result.tabs.find((t) => /linkedin\.com/i.test(t.url));
+    if (linkedin) return linkedin;
+    return result.tabs[0] ?? null;
+  }, [result, selectedTabUrl]);
+
   const selectedUrl = target?.url ?? null;
 
   // Custom dropdown open state.
@@ -490,7 +647,7 @@ export default function HuntAutomation() {
             onClick={() => setMenuOpen((o) => !o)}
             className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-medium text-gray-700 shadow-sm outline-none transition-colors hover:bg-gray-50 focus:ring-2 focus:ring-gray-900/10"
           >
-            {SOURCES.find((s) => s.id === source)?.label ?? "Select automation"}
+            {target ? (target.title?.trim() || new URL(target.url).hostname) : "Select a tab"}
             <CaretDown size={14} className="text-gray-400" />
           </button>
           {menuOpen && (
@@ -498,55 +655,61 @@ export default function HuntAutomation() {
               <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
               <div className="absolute left-0 z-20 mt-2 w-64 overflow-hidden rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg">
                 <p className="px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
-                  Automation
+                  Select a tab to harvest
                 </p>
-                {SOURCES.map((s) => {
-                  const tabForSource = result
-                    ? result.tabs.find((t) => sourceMatches(t.url, s.id)) ?? null
-                    : null;
-                  return (
-                    <div
-                      key={s.id}
-                      className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 transition-colors hover:bg-gray-50"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setSource(s.id);
-                          setMenuOpen(false);
-                        }}
-                        className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm text-gray-700"
+                {result && result.tabs.length > 0 ? (
+                  result.tabs.map((t) => {
+                    const isSelected = target?.url === t.url;
+                    return (
+                      <div
+                        key={t.url}
+                        className="flex items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 transition-colors hover:bg-gray-50"
                       >
-                        <span className="truncate">{s.label}</span>
-                        {source === s.id && <Check size={15} weight="bold" />}
-                      </button>
-                      <div className="flex shrink-0 items-center gap-1">
                         <button
                           type="button"
-                          title="Open tab"
-                          disabled={!tabForSource}
                           onClick={() => {
-                            if (tabForSource) void openTab(tabForSource.url);
-                          }}
-                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900 disabled:cursor-not-allowed disabled:opacity-30"
-                        >
-                          <ArrowSquareOut size={15} />
-                        </button>
-                        <button
-                          type="button"
-                          title="View saved"
-                          onClick={() => {
+                            setSelectedTabUrl(t.url);
                             setMenuOpen(false);
-                            setShowSaved(true);
                           }}
-                          className="flex h-7 w-7 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+                          className="flex min-w-0 flex-1 items-center gap-2 text-left text-sm text-gray-700"
                         >
-                          <Eye size={15} />
+                          <span className="truncate">
+                            {t.title?.trim() || new URL(t.url).hostname}
+                          </span>
+                          {isSelected && <Check size={15} weight="bold" />}
                         </button>
+                        <div className="flex shrink-0 items-center gap-1">
+                          <button
+                            type="button"
+                            title="Open tab"
+                            onClick={() => {
+                              setSelectedTabUrl(t.url);
+                              void openTab(t.url);
+                            }}
+                            className="flex h-7 w-7 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+                          >
+                            <ArrowSquareOut size={15} />
+                          </button>
+                          <button
+                            type="button"
+                            title="View saved"
+                            onClick={() => {
+                              setMenuOpen(false);
+                              setShowSaved(true);
+                            }}
+                            className="flex h-7 w-7 items-center justify-center rounded-md text-gray-500 transition-colors hover:bg-gray-100 hover:text-gray-900"
+                          >
+                            <Eye size={15} />
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                  );
-                })}
+                    );
+                  })
+                ) : (
+                  <p className="px-2.5 py-2 text-sm text-gray-400">
+                    No LinkedIn or JobStreet tabs open in your browser.
+                  </p>
+                )}
                 <div className="my-1.5 h-px bg-gray-100" />
                 <button
                   type="button"
@@ -596,7 +759,7 @@ export default function HuntAutomation() {
         </p>
       )}
 
-      {visibleResult && (
+      {result && result.tabs.length > 0 && (
         <>
           {/* Stepper on top of the candidate table */}
           <SourcingPanel
@@ -621,6 +784,15 @@ export default function HuntAutomation() {
               onToggleRow={toggleRow}
               onToggleAll={toggleAll}
               matchScores={matchScores}
+              toolbarExtra={
+                <HuntLimits
+                  maxCandidates={maxCandidates}
+                  maxPages={maxPages}
+                  onCandidatesChange={setMaxCandidates}
+                  onPagesChange={setMaxPages}
+                  disabled={gathering}
+                />
+              }
               detailFooter={(c) => {
                 const m = matches[c.id];
                 if (!m) return null;
@@ -759,7 +931,9 @@ export default function HuntAutomation() {
   );
 }
 
-const STEP_LABELS = ["Select Tab", "Open Candidate", "Gather Info", "Parse", "Match"];
+// Revamped 7-step labels matching the strategized pipeline:
+// 1 Open Tab → 2 Scrape Candidates (paginated) → 3 Open Profile → 4 Scrape Profile → 5 Close Tab → 6 Parse AI → 7 Match
+const STEP_LABELS = ["Open Tab", "Scrape Candidates", "Open Profile", "Scrape Profile", "Close Tab", "Parse AI", "Match"];
 
 function RoleDropdown({
   roles,
@@ -853,6 +1027,93 @@ function RoleDropdown({
   );
 }
 
+/**
+ * Limit sliders — placed in the SAME row as the "Search candidates" input
+ * inside CandidatesTable's toolbar (via toolbarExtra). Lets the recruiter cap
+ * automation cost: how many candidate profiles to scrape PER PAGE (5–100, pages
+ * is the multiplier → total = perPage * pages) and how many pagination pages
+ * to traverse (1–20). Values persist to localStorage and are
+ * sent as maxCandidates / maxPages to /api/hunt → scrapeCandidates.
+ */
+function HuntLimits({
+  maxCandidates,
+  maxPages,
+  onCandidatesChange,
+  onPagesChange,
+  disabled,
+}: {
+  maxCandidates: number;
+  maxPages: number;
+  onCandidatesChange: (v: number) => void;
+  onPagesChange: (v: number) => void;
+  disabled?: boolean;
+}) {
+  const candidatesUnlimited = maxCandidates >= CANDIDATES_UNLIMITED;
+  const pagesUnlimited = maxPages >= PAGES_UNLIMITED;
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-gray-200 bg-gray-50/70 px-3 py-2">
+      {/* Candidates limit — per page, pages is multiplier */}
+      <div className="flex items-center gap-2.5">
+        <div className="flex flex-col">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+            Candidates / page
+          </span>
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={5}
+              max={CANDIDATES_MAX}
+              step={5}
+              value={maxCandidates}
+              onChange={(e) => onCandidatesChange(Number(e.target.value))}
+              disabled={disabled}
+              aria-label="Max candidates to scrape"
+              className="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-gray-200 accent-gray-900 disabled:cursor-not-allowed disabled:opacity-50 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-gray-900"
+            />
+            <span
+              title={
+                candidatesUnlimited
+                  ? "Unlimited candidates per page"
+                  : `${maxCandidates} candidates per page — total ~${maxCandidates * (maxPages >= PAGES_UNLIMITED ? 1 : maxPages)}`
+              }
+              className={`min-w-[28px] rounded-md bg-white px-1.5 py-0.5 text-center text-xs font-semibold tabular-nums ring-1 ring-inset ${candidatesUnlimited ? "bg-gray-900 text-white ring-gray-900" : "text-gray-900 ring-gray-200"}`}
+            >
+              {candidatesUnlimited ? "∞" : maxCandidates}
+            </span>
+          </div>
+        </div>
+        <div className="h-8 w-px bg-gray-200" aria-hidden />
+        {/* Pages limit — max = unlimited (ellipsis / ∞) */}
+        <div className="flex flex-col">
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">Pages</span>
+          <div className="flex items-center gap-2">
+            <input
+              type="range"
+              min={1}
+              max={PAGES_MAX}
+              step={1}
+              value={maxPages}
+              onChange={(e) => onPagesChange(Number(e.target.value))}
+              disabled={disabled}
+              aria-label="Max pages to scrape — max is unlimited"
+              className="h-1.5 w-20 cursor-pointer appearance-none rounded-full bg-gray-200 accent-gray-900 disabled:cursor-not-allowed disabled:opacity-50 [&::-webkit-slider-thumb]:h-3.5 [&::-webkit-slider-thumb]:w-3.5 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-gray-900"
+            />
+            <span
+              title={pagesUnlimited ? "Unlimited pages (ellipsis) — scrape until no next page" : `${maxPages} pages`}
+              className={`min-w-[22px] rounded-md px-1.5 py-0.5 text-center text-xs font-semibold tabular-nums ring-1 ring-inset ${pagesUnlimited ? "bg-gray-900 text-white ring-gray-900" : "bg-white text-gray-900 ring-gray-200"}`}
+            >
+              {pagesUnlimited ? "…" : maxPages}
+            </span>
+          </div>
+        </div>
+      </div>
+      <span className="hidden text-[11px] text-gray-400 sm:inline">
+        {pagesUnlimited || candidatesUnlimited ? "unlimited" : "limits"}
+      </span>
+    </div>
+  );
+}
+
 function SourcingPanel({
   target,
   phase,
@@ -874,27 +1135,47 @@ function SourcingPanel({
   roleId: string | null;
   onSelectRole: (id: string) => void;
 }) {
+  // 7-step stepper status mapping:
+  // 1 Open Tab (focus) — done once target exists; active while phase===opening
+  // 2 Scrape Candidates — active while phase===scraping
+  // 3-5 Open/Scrape/Close Profile — together represent the extracting loop;
+  //     all three light up when phase===extracting, then mark done for later phases
+  // 6 Parse AI, 7 Match — standard sequential
   const stepStatus = (idx: number): "done" | "active" | "upcoming" => {
-    if (idx === 1) return target ? "done" : "active";
+    if (idx === 1) {
+      if (!target) return "active";
+      if (phase === "opening") return "active";
+      return "done";
+    }
     if (idx === 2) {
       if (!target) return "upcoming";
-      if (phase === "opening") return "active";
-      if (phase === "gathering" || phase === "parsing" || phase === "done") return "done";
-      return "active";
-    }
-    if (idx === 3) {
-      if (phase === "gathering") return "active";
-      if (phase === "parsing" || phase === "done") return "done";
+      if (phase === "opening") return "upcoming";
+      if (phase === "scraping") return "active";
+      if (
+        phase === "extracting" ||
+        phase === "parsing" ||
+        phase === "matching" ||
+        phase === "returning" ||
+        phase === "done"
+      )
+        return "done";
       return "upcoming";
     }
-    if (idx === 4) {
+    // Steps 3-5 are the per-candidate open→scrape→close atomic loop (extracting)
+    if (idx === 3 || idx === 4 || idx === 5) {
+      if (phase === "scraping" || phase === "opening" || phase === "idle") return "upcoming";
+      if (phase === "extracting") return "active";
+      if (phase === "parsing" || phase === "matching" || phase === "returning" || phase === "done") return "done";
+      return "upcoming";
+    }
+    if (idx === 6) {
       if (phase === "parsing") return "active";
-      if (phase === "matching" || phase === "done") return "done";
+      if (phase === "matching" || phase === "returning" || phase === "done") return "done";
       return "upcoming";
     }
-    if (idx === 5) {
+    if (idx === 7) {
       if (phase === "matching") return "active";
-      if (phase === "done") return "done";
+      if (phase === "returning" || phase === "done") return "done";
       return "upcoming";
     }
     return "upcoming";
@@ -934,22 +1215,37 @@ function SourcingPanel({
         </div>
       </div>
 
-      {/* Progress detail */}
+      {/* Progress detail — maps directly to the 7 user-requested steps */}
       {gathering && progress && (
         <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
           {phase === "opening"
-            ? "Opening candidate profiles…"
-            : phase === "gathering"
-              ? "Gathering information…"
-              : phase === "parsing"
-                ? "Parsing profiles…"
-                : "Matching candidates to job description…"}{" "}
+            ? "Step 1 — Opening sourcing tab…"
+            : phase === "scraping"
+              ? "Step 2 — Scraping candidate names & pagination…"
+              : phase === "extracting"
+                ? "Steps 3-5 — Opening profile → Scraping → Closing (sequential)…"
+                : phase === "parsing"
+                  ? "Step 6 — Parsing profiles with AI (batch)…"
+                  : phase === "returning"
+                    ? "Returning to scrap candidate page…"
+                    : "Step 7 — Matching candidates to job description…"}{" "}
           · {progress.done} / {progress.total}
         </p>
       )}
-      {phase === "done" && progress === null && (
+      {/* When scraping has a total but extraction hasn't started, show scrape count without progress bar */}
+      {gathering && !progress && phase === "scraping" && (
+        <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
+          Step 2 — Scraping candidate names & pagination…
+        </p>
+      )}
+      {gathering && phase === "returning" && !progress && (
+        <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
+          Returning to scrap candidate page…
+        </p>
+      )}
+      {phase === "done" && (
         <p className="border-t border-gray-100 px-4 py-2.5 text-xs font-medium text-emerald-600">
-          Done — all candidates gathered and saved.
+          Done — steps 1-7 complete: tab opened, candidates scraped (with pagination), each profile opened → scraped → closed, AI-parsed, and matched.
         </p>
       )}
     </div>

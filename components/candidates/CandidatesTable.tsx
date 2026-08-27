@@ -164,6 +164,8 @@ type CandidatesTableProps = {
   onDeleteRequest: (candidate: CandidateRow) => void;
   /** Optional actions rendered on the right side of the search toolbar. */
   actions?: React.ReactNode;
+  /** Optional extra controls (e.g. limit sliders) rendered in the same search toolbar row. */
+  toolbarExtra?: React.ReactNode;
   /** Enables row multi-selection (used by Hunt Automation). */
   selectable?: boolean;
   selectedIds?: string[];
@@ -180,6 +182,7 @@ export default function CandidatesTable({
   loading,
   onDeleteRequest,
   actions,
+  toolbarExtra,
   selectable = false,
   selectedIds = [],
   onToggleRow,
@@ -209,11 +212,12 @@ export default function CandidatesTable({
 
   return (
     <div className="overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm backdrop-blur">
-      {/* Search toolbar */}
-      <div className="flex items-center gap-3 border-b border-gray-100 px-4 py-3">
-        <div className="flex-1">
+      {/* Search toolbar — search + limit sliders + actions all in one row */}
+      <div className="flex flex-wrap items-center gap-3 border-b border-gray-100 px-4 py-3">
+        <div className="min-w-[180px] flex-1">
           <TableSearch value={query} onChange={setQuery} placeholder="Search candidates…" />
         </div>
+        {toolbarExtra}
         {actions}
       </div>
       <table className="w-full border-collapse text-left text-sm">
