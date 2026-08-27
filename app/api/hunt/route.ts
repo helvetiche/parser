@@ -3,9 +3,11 @@ import { requireUser } from "@/lib/auth-server";
 import {
   extractCandidateProfile,
   focusBrowserTab,
+  goToNextPage,
   listBrowserTabs,
   returnToScrapePage,
   scrapeCandidates,
+  scrapeSinglePage,
 } from "@/lib/hunt/automation";
 import { listRoles } from "@/lib/firestore-server";
 import { DEFAULT_MATCH_INSTRUCTIONS, matchCandidateToRole } from "@/lib/match-role";
@@ -25,7 +27,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(result);
     }
 
-    // STEP 2 — Scrape all candidate names + pagination.
+    // STEP 2 — Scrape all candidate names + pagination (legacy fused).
     // Accepts optional maxPages (1..50) and maxCandidates (1..500) to bound traversal.
     if (typeof body?.scrape === "string" && body.scrape) {
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
@@ -41,6 +43,28 @@ export async function POST(req: NextRequest) {
       if (maxPages !== undefined) opts.maxPages = maxPages;
       if (maxCandidates !== undefined) opts.maxCandidates = maxCandidates;
       const result = await scrapeCandidates(body.scrape, endpoint, opts);
+      return NextResponse.json(result);
+    }
+
+    // STEP 2 — Explicit single-page scrape: get ALL candidate URLs for the whole page
+    // (no pagination). Used in the new 3-step loop: 1) scrape page → 2) paginate → 3) loop.
+    if (typeof body?.scrapePage === "string" && body.scrapePage) {
+      const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
+      const maxPerPage =
+        typeof body?.maxPerPage === "number" && Number.isFinite(body.maxPerPage)
+          ? Math.max(1, Math.min(Math.floor(body.maxPerPage), 500))
+          : typeof body?.maxCandidates === "number" && Number.isFinite(body.maxCandidates)
+            ? Math.max(1, Math.min(Math.floor(body.maxCandidates), 500))
+            : undefined;
+      const result = await scrapeSinglePage(body.scrapePage, endpoint, maxPerPage ?? 25);
+      return NextResponse.json(result);
+    }
+
+    // STEP 3 — Scrap pagination (new): move to next page when Step 2 is done.
+    // Returns {moved, hasMore} so the orchestrator can loop until limit reached.
+    if (typeof body?.nextPage === "string" && body.nextPage) {
+      const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
+      const result = await goToNextPage(body.nextPage, endpoint);
       return NextResponse.json(result);
     }
 

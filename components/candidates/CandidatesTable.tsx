@@ -3,8 +3,10 @@
 import { useMemo, useState } from "react";
 import {
   Briefcase,
+  CaretDown,
   Clock,
   EnvelopeSimple,
+  Funnel,
   Globe,
   GraduationCap,
   Lightning,
@@ -192,30 +194,74 @@ export default function CandidatesTable({
 }: CandidatesTableProps) {
   const [selected, setSelected] = useState<CandidateRow | null>(null);
   const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<"none" | "highest" | "lowest">("none");
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return candidates;
-    return candidates.filter((c) =>
-      [c.fullName, c.summary, c.education, ...c.skills, ...c.experience]
-        .filter(Boolean)
-        .join(" ")
-        .toLowerCase()
-        .includes(q)
-    );
-  }, [candidates, query]);
+    let base = candidates;
+    if (q) {
+      base = candidates.filter((c) =>
+        [c.fullName, c.summary, c.education, ...c.skills, ...c.experience]
+          .filter(Boolean)
+          .join(" ")
+          .toLowerCase()
+          .includes(q)
+      );
+    }
+    if (sort === "none" || !matchScores) return base;
+    // Sort by match rate — missing scores always at bottom regardless of direction
+    const scored = [...base].sort((a, b) => {
+      const sa = matchScores[a.id];
+      const sb = matchScores[b.id];
+      const aHas = typeof sa === "number";
+      const bHas = typeof sb === "number";
+      if (!aHas && !bHas) return 0;
+      if (!aHas) return 1;
+      if (!bHas) return -1;
+      return sort === "highest" ? sb - sa : sa - sb;
+    });
+    return scored;
+  }, [candidates, query, sort, matchScores]);
 
   const colCount = CANDIDATE_COLUMNS.length + (selectable ? 1 : 0);
   const visibleIds = filtered.map((c) => c.id);
   const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedIds.includes(id));
   const someSelected = visibleIds.some((id) => selectedIds.includes(id));
 
+  // Show match-rate filter only when scores exist (Hunt Automation)
+  const hasScores = !!matchScores && Object.keys(matchScores).length > 0;
+
   return (
     <div className="overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm backdrop-blur">
-      {/* Search toolbar — search + limit sliders + actions all in one row */}
+      {/* Search toolbar — search + filter (close together) + limit sliders + actions */}
       <div className="flex flex-wrap items-center gap-3 border-b border-gray-100 px-4 py-3">
-        <div className="min-w-[180px] flex-1">
-          <TableSearch value={query} onChange={setQuery} placeholder="Search candidates…" />
+        <div className="flex min-w-[280px] flex-1 items-center gap-2">
+          <div className="min-w-[180px] flex-1">
+            <TableSearch value={query} onChange={setQuery} placeholder="Search candidates…" />
+          </div>
+          {matchScores && (
+            <>
+              <div className="flex shrink-0 items-center gap-1.5 rounded-xl border border-gray-200 bg-white px-3 py-2 shadow-sm">
+                <Funnel size={14} weight="fill" className="text-gray-500" />
+                <select
+                  value={sort}
+                  onChange={(e) => setSort(e.target.value as "none" | "highest" | "lowest")}
+                  aria-label="Filter by match rate"
+                  className="appearance-none bg-transparent pr-5 text-sm font-medium text-gray-700 outline-none"
+                >
+                  <option value="none">Match rate</option>
+                  <option value="highest">Highest first</option>
+                  <option value="lowest">Lowest first</option>
+                </select>
+                <CaretDown size={12} className="pointer-events-none text-gray-400" />
+              </div>
+              {hasScores && sort !== "none" && (
+                <span className="hidden text-xs text-gray-400 sm:inline">
+                  {sort === "highest" ? "↓ High → Low" : "↑ Low → High"}
+                </span>
+              )}
+            </>
+          )}
         </div>
         {toolbarExtra}
         {actions}

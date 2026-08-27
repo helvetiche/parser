@@ -67,15 +67,16 @@ function rateColorClass(score: number): string {
 }
 
 /**
- * Revamped 7-step pipeline:
- *  1. opening    — STEP 1: open tab (focusBrowserTab / bringToFront)
- *  2. scraping   — STEP 2: scrape all candidate names + pagination (scrapeCandidates)
- *  3-5. extracting — STEPS 3-5: for each candidate: open profile → scrape raw → close tab
- *                  (extractCandidateProfile guarantees open/scrape/close per candidate)
- *  6. parsing    — STEP 6: batch AI parse of ALL raws (parseProfile) — no interleaving
- *  7. matching   — STEP 7: batch match each parsed candidate to role (matchCandidateToRole)
+ * Revamped pipeline — explicit pagination as Step 3 per user proposal:
+ *  1. opening      — STEP 1: open tab (focusBrowserTab)
+ *  2. scraping     — STEP 2: scrap candidates (WHOLE page — get ALL URLs for that page)
+ *  3. paginating   — STEP 3: scrap pagination (new) — move to next page when Step 2 done
+ *     Loop 2→3 until limit reached (if 5 pages, scrap all 5 pages before parsing)
+ *  4-6. extracting — STEPS 4-6: for each gathered link: open profile → scrape raw → close tab
+ *  7. parsing      — STEP 7: batch AI parse of ALL raws (only after all pages gathered)
+ *  8. matching     — STEP 8: batch match to role
  */
-type Phase = "idle" | "opening" | "scraping" | "extracting" | "parsing" | "matching" | "returning" | "done";
+type Phase = "idle" | "opening" | "scraping" | "paginating" | "extracting" | "parsing" | "matching" | "returning" | "done";
 
 export default function HuntAutomation() {
   const [scanning, setScanning] = useState(false);
@@ -337,7 +338,9 @@ export default function HuntAutomation() {
    * total = perPage * pages. The full list is returned before any profile
    * is opened (steps 3-5).
    */
-  const doScrape = async (): Promise<ScrapedCandidate[]> => {
+  // STEP 2 — Scrap candidates (whole page) — explicit single-page scrape
+  // Gets ALL candidate URLs for the current page only (no pagination).
+  const doScrapePage = async (): Promise<ScrapedCandidate[]> => {
     if (!selectedUrl) {
       setScrapeError("Select a tab first.");
       return [];
@@ -346,26 +349,42 @@ export default function HuntAutomation() {
     try {
       const token = await getIdToken();
       if (!token) throw new Error("You are signed out. Please sign in again.");
-      // Slider at max → unlimited: map to backend hard caps (effectively no limit)
-      const effectiveMaxPages = maxPages >= PAGES_UNLIMITED ? BACKEND_MAX_PAGES : maxPages;
-      const effectiveMaxCandidates =
+      const effectiveMaxPerPage =
         maxCandidates >= CANDIDATES_UNLIMITED ? BACKEND_MAX_CANDIDATES : maxCandidates;
       const res = await fetch("/api/hunt", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
         body: JSON.stringify({
-          scrape: selectedUrl,
-          maxPages: effectiveMaxPages,
-          maxCandidates: effectiveMaxCandidates,
+          scrapePage: selectedUrl,
+          maxPerPage: effectiveMaxPerPage,
+          maxCandidates: effectiveMaxPerPage,
         }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "Failed to scrape candidates");
-      // Optional debug: pagesScraped / hasMorePages are available on data.debug
       return data.candidates as ScrapedCandidate[];
     } catch (err) {
       setScrapeError(err instanceof Error ? err.message : "Failed to scrape candidates");
       return [];
+    }
+  };
+
+  // STEP 3 — Scrap pagination (new) — move to next page when Step 2 is done
+  const doNextPage = async (): Promise<boolean> => {
+    if (!selectedUrl) return false;
+    try {
+      const token = await getIdToken();
+      if (!token) return false;
+      const res = await fetch("/api/hunt", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ nextPage: selectedUrl }),
+      });
+      const data = await res.json();
+      if (!res.ok) return false;
+      return !!data.moved;
+    } catch {
+      return false;
     }
   };
 
@@ -545,22 +564,50 @@ export default function HuntAutomation() {
       setPhase("opening");
       await openTab(selectedUrl);
 
-      // STEP 2 — Scrape all candidate names + pagination (capped by sliders)
-      setPhase("scraping");
-      const list = await doScrape();
-      if (list.length === 0) {
+      // STEP 2 + STEP 3 — Explicit per-page loop per user proposal:
+      // 1) get ALL candidate URLs for the whole page (Step 2)
+      // 2) move to next page and do Step 1 (Step 3 — new)
+      // 3) loop until limit is reached (perPage * pages)
+      // This ensures if there are 5 pages, we scrap all 5 pages before parsing.
+      const effectiveMaxPages = maxPages >= PAGES_UNLIMITED ? BACKEND_MAX_PAGES : maxPages;
+      const effectiveMaxPerPage =
+        maxCandidates >= CANDIDATES_UNLIMITED ? BACKEND_MAX_CANDIDATES : maxCandidates;
+      const isUnlimitedTotal = maxCandidates >= CANDIDATES_UNLIMITED || maxPages >= PAGES_UNLIMITED;
+      const totalLimit = isUnlimitedTotal ? Infinity : effectiveMaxPerPage * effectiveMaxPages;
+      const allCandidates: ScrapedCandidate[] = [];
+      const seenUrls = new Set<string>();
+      let pagesScraped = 0;
+      for (let pageIdx = 0; pageIdx < effectiveMaxPages; pageIdx++) {
+        // STEP 2 — Scrap candidates (whole page)
+        setPhase("scraping");
+        setProgress({ done: allCandidates.length, total: Number.isFinite(totalLimit) ? totalLimit : allCandidates.length + effectiveMaxPerPage });
+        const perPageCandidates = await doScrapePage();
+        pagesScraped++;
+        // Dedup and aggregate
+        for (const c of perPageCandidates) {
+          if (!seenUrls.has(c.url)) {
+            seenUrls.add(c.url);
+            allCandidates.push(c);
+          }
+        }
+        // Even if page empty, still try pagination (don't abort on sparse pages)
+        // Check limit reached — Step 3 loop condition
+        if (Number.isFinite(totalLimit) && allCandidates.length >= totalLimit) {
+          break;
+        }
+        if (pageIdx >= effectiveMaxPages - 1) break;
+        // STEP 3 — Scrap pagination (new) — move to next page when Step 2 is done
+        setPhase("paginating");
+        setProgress({ done: pagesScraped, total: effectiveMaxPages });
+        const moved = await doNextPage();
+        if (!moved) break;
+      }
+      if (allCandidates.length === 0) {
         setPhase("idle");
         return;
       }
-      // Slider guard — candidate slider is PER PAGE, pages is multiplier
-      // total = perPage * pages. Backend already slices per-page, but enforce
-      // total cap deterministically for safety.
-      // Unlimited per-page (∞) or unlimited pages (∞) → no total slicing.
-      const totalCap =
-        maxCandidates >= CANDIDATES_UNLIMITED || maxPages >= PAGES_UNLIMITED
-          ? Infinity
-          : maxCandidates * maxPages;
-      const cappedList = Number.isFinite(totalCap) ? list.slice(0, totalCap) : list;
+      // Final safety cap (backend hard limit 500 already, but enforce total)
+      const cappedList = Number.isFinite(totalLimit) ? allCandidates.slice(0, totalLimit) : allCandidates.slice(0, 500);
 
       // STEPS 3-5 — Open each profile → scrape → close (sequential, guaranteed close)
       setPhase("extracting");
@@ -931,9 +978,9 @@ export default function HuntAutomation() {
   );
 }
 
-// Revamped 7-step labels matching the strategized pipeline:
-// 1 Open Tab → 2 Scrape Candidates (paginated) → 3 Open Profile → 4 Scrape Profile → 5 Close Tab → 6 Parse AI → 7 Match
-const STEP_LABELS = ["Open Tab", "Scrape Candidates", "Open Profile", "Scrape Profile", "Close Tab", "Parse AI", "Match"];
+// Revamped 8-step labels — explicit pagination per user proposal:
+// 1 Open Tab → 2 Scrap candidates (whole page) → 3 Scrap pagination (new) → 4 Open Profile → 5 Scrape Profile → 6 Close Tab → 7 Parse AI → 8 Match
+const STEP_LABELS = ["Open Tab", "Scrap Candidates", "Scrap Pagination", "Open Profile", "Scrape Profile", "Close Tab", "Parse AI", "Match"];
 
 function RoleDropdown({
   roles,
@@ -1135,12 +1182,13 @@ function SourcingPanel({
   roleId: string | null;
   onSelectRole: (id: string) => void;
 }) {
-  // 7-step stepper status mapping:
-  // 1 Open Tab (focus) — done once target exists; active while phase===opening
-  // 2 Scrape Candidates — active while phase===scraping
-  // 3-5 Open/Scrape/Close Profile — together represent the extracting loop;
-  //     all three light up when phase===extracting, then mark done for later phases
-  // 6 Parse AI, 7 Match — standard sequential
+  // 8-step stepper status mapping (explicit pagination):
+  // 1 Open Tab — opening
+  // 2 Scrap candidates (whole page) — scraping
+  // 3 Scrap pagination (new) — paginating (move to next page when Step 2 done)
+  // 4-6 Open/Scrape/Close Profile — extracting
+  // 7 Parse AI — parsing
+  // 8 Match — matching
   const stepStatus = (idx: number): "done" | "active" | "upcoming" => {
     if (idx === 1) {
       if (!target) return "active";
@@ -1152,6 +1200,7 @@ function SourcingPanel({
       if (phase === "opening") return "upcoming";
       if (phase === "scraping") return "active";
       if (
+        phase === "paginating" ||
         phase === "extracting" ||
         phase === "parsing" ||
         phase === "matching" ||
@@ -1161,19 +1210,33 @@ function SourcingPanel({
         return "done";
       return "upcoming";
     }
-    // Steps 3-5 are the per-candidate open→scrape→close atomic loop (extracting)
-    if (idx === 3 || idx === 4 || idx === 5) {
+    if (idx === 3) {
+      if (!target) return "upcoming";
       if (phase === "scraping" || phase === "opening" || phase === "idle") return "upcoming";
+      if (phase === "paginating") return "active";
+      if (
+        phase === "extracting" ||
+        phase === "parsing" ||
+        phase === "matching" ||
+        phase === "returning" ||
+        phase === "done"
+      )
+        return "done";
+      return "upcoming";
+    }
+    // Steps 4-6 are the per-candidate open→scrape→close atomic loop (extracting)
+    if (idx === 4 || idx === 5 || idx === 6) {
+      if (phase === "scraping" || phase === "paginating" || phase === "opening" || phase === "idle") return "upcoming";
       if (phase === "extracting") return "active";
       if (phase === "parsing" || phase === "matching" || phase === "returning" || phase === "done") return "done";
       return "upcoming";
     }
-    if (idx === 6) {
+    if (idx === 7) {
       if (phase === "parsing") return "active";
       if (phase === "matching" || phase === "returning" || phase === "done") return "done";
       return "upcoming";
     }
-    if (idx === 7) {
+    if (idx === 8) {
       if (phase === "matching") return "active";
       if (phase === "returning" || phase === "done") return "done";
       return "upcoming";
@@ -1215,27 +1278,34 @@ function SourcingPanel({
         </div>
       </div>
 
-      {/* Progress detail — maps directly to the 7 user-requested steps */}
+      {/* Progress detail — maps to 8 explicit steps (pagination is Step 3) */}
       {gathering && progress && (
         <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
           {phase === "opening"
             ? "Step 1 — Opening sourcing tab…"
             : phase === "scraping"
-              ? "Step 2 — Scraping candidate names & pagination…"
-              : phase === "extracting"
-                ? "Steps 3-5 — Opening profile → Scraping → Closing (sequential)…"
-                : phase === "parsing"
-                  ? "Step 6 — Parsing profiles with AI (batch)…"
-                  : phase === "returning"
-                    ? "Returning to scrap candidate page…"
-                    : "Step 7 — Matching candidates to job description…"}{" "}
+              ? "Step 2 — Scraping candidates (whole page)…"
+              : phase === "paginating"
+                ? "Step 3 — Scraping pagination (Next)…"
+                : phase === "extracting"
+                  ? "Steps 4-6 — Opening profile → Scraping → Closing (sequential)…"
+                  : phase === "parsing"
+                    ? "Step 7 — Parsing profiles with AI (batch)…"
+                    : phase === "returning"
+                      ? "Returning to scrap candidate page…"
+                      : "Step 8 — Matching candidates to job description…"}{" "}
           · {progress.done} / {progress.total}
         </p>
       )}
       {/* When scraping has a total but extraction hasn't started, show scrape count without progress bar */}
       {gathering && !progress && phase === "scraping" && (
         <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
-          Step 2 — Scraping candidate names & pagination…
+          Step 2 — Scraping candidates (whole page)…
+        </p>
+      )}
+      {gathering && !progress && phase === "paginating" && (
+        <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
+          Step 3 — Scraping pagination — moving to next page…
         </p>
       )}
       {gathering && phase === "returning" && !progress && (
@@ -1245,7 +1315,7 @@ function SourcingPanel({
       )}
       {phase === "done" && (
         <p className="border-t border-gray-100 px-4 py-2.5 text-xs font-medium text-emerald-600">
-          Done — steps 1-7 complete: tab opened, candidates scraped (with pagination), each profile opened → scraped → closed, AI-parsed, and matched.
+          Done — steps 1-8 complete: tab opened, candidates scraped across all pages, pagination handled, each profile opened → scraped → closed, AI-parsed, and matched.
         </p>
       )}
     </div>

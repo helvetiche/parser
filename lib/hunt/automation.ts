@@ -436,9 +436,6 @@ export async function scrapeCandidates(
             (text.includes("next") && text.length < 30);
           if (!isNext) continue;
           if (!isVisible(el) || !isEnabled(el)) continue;
-          // Prefer pagination container
-          const inPag = !!el.closest('.artdeco-pagination, .pagination, nav[aria-label*="pagination" i]');
-          // Return with a selector we can re-find, or mark as text-based
           // Use a temporary marker to re-find via evaluate click
           (el as HTMLElement).setAttribute("data-hunt-next", "1");
           return { found: true, selector: '[data-hunt-next="1"]', via: "text" as const };
@@ -555,6 +552,309 @@ export async function scrapeCandidates(
         hasMorePages,
       },
     };
+  } finally {
+    void browser.close().catch(() => {});
+  }
+}
+
+// ── Explicit per-step primitives for the new 3-step proposal ──
+// Step 2: scrape the WHOLE current page (all candidate links, scroll-stable)
+// Step 3: pagination — move to next page when Step 2 is done
+// These are used by the new explicit loop in HuntAutomation; `scrapeCandidates`
+// above remains as a backward-compatible wrapper that internally loops 2→3.
+
+export type ScrapePageResult = {
+  count: number;
+  candidates: ScrapedCandidate[];
+  debug: {
+    matchedUrl: string | null;
+    totalAnchors: number;
+    inAnchors: number;
+  };
+};
+
+function resolveTargetPage(
+  contexts: BrowserContext[],
+  targetUrl: string
+): Page | null {
+  // Exact match first
+  for (const ctx of contexts) {
+    for (const p of ctx.pages()) if (p.url() === targetUrl) return p;
+  }
+  // Meaningful fallback
+  const meaningful = (u: string) => {
+    try {
+      const path = new URL(u).pathname.replace(/\/$/, "");
+      return /\/(talent|recruiter)/i.test(path) && !/(talent|recruiter)\/?$/i.test(path);
+    } catch {
+      return false;
+    }
+  };
+  let fallback: Page | null = null;
+  for (const ctx of contexts) {
+    for (const p of ctx.pages()) {
+      if (p.url().includes("linkedin.com") || p.url().includes("jobstreet.com")) {
+        if (meaningful(p.url())) return p;
+        fallback ??= p;
+      }
+    }
+  }
+  return fallback;
+}
+
+/**
+ * STEP 2 — Scrape **single** page: get ALL candidate URLs for the whole page
+ * (exhaustive scroll → extract → per-page slice). No pagination here.
+ */
+export async function scrapeSinglePage(
+  targetUrl: string,
+  endpoint: string = DEFAULT_CDP,
+  maxPerPage: number = 25
+): Promise<ScrapePageResult> {
+  let browser: Browser;
+  try {
+    browser = await chromium.connectOverCDP(endpoint, { timeout: 5000 });
+  } catch {
+    throw browserUnreachableError(endpoint);
+  }
+  try {
+    const contexts: BrowserContext[] = browser.contexts();
+    const page = resolveTargetPage(contexts, targetUrl);
+    if (!page) throw new Error("Selected tab is no longer open in the browser.");
+    const matchedUrl = page.url();
+    await page.bringToFront().catch(() => {});
+    const isRecruiter =
+      (await page.$("ol.profile-list")) !== null ||
+      /linkedin\.com\/recruiter/i.test(matchedUrl) ||
+      (await page.$('a[href*="/talent/profile/"], a[href*="/recruiter/profile/"]')) !== null;
+
+    const data = await page.evaluate(async (recruiter: boolean) => {
+      const scroller =
+        (document.querySelector("ol.profile-list")?.parentElement as HTMLElement) ||
+        (document.querySelector(".scaffold-finite-scroll") as HTMLElement | null) ||
+        document.scrollingElement;
+      const sel = 'a[href*="/in/"], a[href*="/talent/profile/"], a[href*="/recruiter/profile/"]';
+      let last = 0;
+      let stable = 0;
+      for (let i = 0; i < 40; i++) {
+        if (scroller) (scroller as HTMLElement).scrollTop = (scroller as HTMLElement).scrollHeight;
+        window.scrollTo(0, document.body.scrollHeight);
+        await new Promise((r) => setTimeout(r, 400));
+        const n = document.querySelectorAll(sel).length;
+        if (n === last) {
+          if (++stable >= 3) break;
+        } else {
+          stable = 0;
+        }
+        last = n;
+      }
+      const all = Array.from(document.querySelectorAll<HTMLAnchorElement>(sel));
+      const seen = new Set<string>();
+      const out: { name: string; url: string }[] = [];
+      for (const a of all) {
+        const match = a.href.match(
+          /https?:\/\/(www\.)?linkedin\.com\/(?:in|talent\/profile|recruiter\/profile)\/[^\?#]+/i
+        );
+        if (!match) continue;
+        const url = match[0];
+        if (/\/(recruiter|talent)\/?($|\?|#)/i.test(url)) continue;
+        if (seen.has(url)) continue;
+        seen.add(url);
+        let name = (a.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
+        name = name.replace(/^View\s+profile\s+for\s+/i, "").trim();
+        if (!name) name = (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim();
+        if (!name) {
+          const parent = a.closest('[class*="name" i], [class*="title" i]') ?? a.parentElement;
+          name = parent ? (parent.textContent || "").replace(/\s+/g, " ").trim() : "";
+        }
+        if (!name) name = url;
+        out.push({ name, url });
+      }
+      if (recruiter && out.length === 0) {
+        for (const li of Array.from(document.querySelectorAll("ol.profile-list > li"))) {
+          const label =
+            li.querySelector(".profile-list-item__selector .a11y-text")?.textContent?.trim() || "";
+          const name = label.replace(/^Select\s+/i, "").trim();
+          const link = li.querySelector(
+            '.standard-profile-row a[href*="/talent/profile/"], .standard-profile-row a[href*="/recruiter/profile/"], .standard-profile-row a[href*="/in/"]'
+          ) as HTMLAnchorElement | null;
+          if (name && link?.href) out.push({ name, url: link.href });
+        }
+      }
+      if (out.length === 0) {
+        const genericSel = 'a[href*="/profile"], a[href*="/candidate"], a[href*="/resume"]';
+        const generic = Array.from(document.querySelectorAll<HTMLAnchorElement>(genericSel));
+        for (const a of generic) {
+          const url = a.href.split("?")[0].split("#")[0];
+          if (!url || seen.has(url)) continue;
+          seen.add(url);
+          const name = (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim() || url;
+          out.push({ name, url });
+        }
+      }
+      return {
+        candidates: out,
+        totalAnchors: document.querySelectorAll("a").length,
+        inAnchors: all.length,
+      };
+    }, isRecruiter);
+
+    const perPageSlice = maxPerPage >= 500 ? data.candidates : data.candidates.slice(0, maxPerPage);
+    return {
+      count: perPageSlice.length,
+      candidates: perPageSlice,
+      debug: {
+        matchedUrl,
+        totalAnchors: data.totalAnchors,
+        inAnchors: data.inAnchors,
+      },
+    };
+  } finally {
+    void browser.close().catch(() => {});
+  }
+}
+
+export type PaginationResult = {
+  moved: boolean;
+  hasMore: boolean;
+  url: string | null;
+  reason: string;
+};
+
+/**
+ * STEP 3 — Scrap pagination (new): move to next page when Step 2 is done.
+ * Called after all candidates for the current page are scrapped; clicks an
+ * enabled "Next" control and waits for the next page to hydrate.
+ * Returns `moved=false` when no Next exists or maxPages already reached.
+ */
+export async function goToNextPage(
+  targetUrl: string,
+  endpoint: string = DEFAULT_CDP
+): Promise<PaginationResult> {
+  let browser: Browser;
+  try {
+    browser = await chromium.connectOverCDP(endpoint, { timeout: 5000 });
+  } catch {
+    throw browserUnreachableError(endpoint);
+  }
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  try {
+    const contexts: BrowserContext[] = browser.contexts();
+    const page = resolveTargetPage(contexts, targetUrl);
+    if (!page) throw new Error("Selected tab is no longer open in the browser.");
+    await page.bringToFront().catch(() => {});
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+    await sleep(600);
+    await page
+      .evaluate(() => {
+        const pag = document.querySelector(
+          '.artdeco-pagination, .pagination, [data-test-pagination], nav[aria-label*="pagination" i]'
+        ) as HTMLElement | null;
+        if (pag) pag.scrollIntoView({ block: "center" });
+      })
+      .catch(() => {});
+    await sleep(400);
+
+    const pagination = await page.evaluate(() => {
+      const isVisible = (el: Element) => {
+        const he = el as HTMLElement;
+        if (he.offsetParent !== null) return true;
+        const r = he.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const isEnabled = (el: Element) => {
+        const he = el as HTMLElement;
+        if ((he as HTMLButtonElement).disabled) return false;
+        if (he.getAttribute("aria-disabled") === "true") return false;
+        if (he.getAttribute("disabled") !== null) return false;
+        if (he.classList.contains("disabled")) return false;
+        if (he.classList.contains("artdeco-button--disabled")) return false;
+        if (he.classList.contains("pagination__next--disabled")) return false;
+        return true;
+      };
+      const allClickable = Array.from(document.querySelectorAll('button, a, [role="button"]'));
+      for (const el of allClickable) {
+        const text = (el.textContent || "").trim().toLowerCase();
+        const aria = (el.getAttribute("aria-label") || "").toLowerCase();
+        const title = (el.getAttribute("title") || "").toLowerCase();
+        const isNext =
+          aria.includes("next") || title.includes("next") || text === "next" || (text.includes("next") && text.length < 30);
+        if (!isNext) continue;
+        if (!isVisible(el) || !isEnabled(el)) continue;
+        (el as HTMLElement).setAttribute("data-hunt-next", "1");
+        return { found: true, selector: '[data-hunt-next="1"]' as string };
+      }
+      const selectors = [
+        'button[aria-label*="Next" i]',
+        'a[aria-label*="Next" i]',
+        'button[aria-label*="next page" i]',
+        'a[aria-label*="next page" i]',
+        'button.artdeco-pagination__button--next',
+        'li.artdeco-pagination__indicator--next button',
+        'button.pagination__next-btn',
+        'li.pagination__next button',
+        '[data-test-pagination-next-btn]',
+        '[data-testid="pagination-next"]',
+        'button[data-testid*="next" i]',
+        'a[rel="next"]',
+        '.pagination a.next',
+        '.pagination button.next',
+        '.artdeco-pagination__button--next',
+        'button:has-text("Next")',
+        'button[aria-label="Next page"]',
+        'a[aria-label="Next page"]',
+      ];
+      for (const sel of selectors) {
+        try {
+          const el = document.querySelector(sel) as HTMLElement | null;
+          if (!el) continue;
+          if (!isVisible(el) || !isEnabled(el)) continue;
+          return { found: true, selector: sel };
+        } catch {
+          continue;
+        }
+      }
+      return { found: false, selector: null as string | null };
+    });
+
+    if (!pagination.found || !pagination.selector) {
+      await page.evaluate(() => document.querySelectorAll("[data-hunt-next]").forEach((e) => e.removeAttribute("data-hunt-next"))).catch(() => {});
+      return { moved: false, hasMore: false, url: page.url(), reason: "no-next" };
+    }
+
+    const beforeUrl = page.url();
+    const clicked = await page
+      .evaluate((sel) => {
+        const el = document.querySelector(sel as string) as HTMLElement | null;
+        if (!el) return false;
+        (el as HTMLElement).click();
+        document.querySelectorAll("[data-hunt-next]").forEach((e) => e.removeAttribute("data-hunt-next"));
+        return true;
+      }, pagination.selector)
+      .catch(() => false);
+
+    if (!clicked) {
+      return { moved: false, hasMore: false, url: page.url(), reason: "click-failed" };
+    }
+
+    await sleep(1200);
+    await page.waitForLoadState("domcontentloaded").catch(() => {});
+    await sleep(1200);
+    for (let w = 0; w < 8; w++) {
+      const changed = await page
+        .evaluate(({ beforeUrl }) => location.href !== beforeUrl, { beforeUrl })
+        .catch(() => false);
+      // Also check anchor count changed
+      const anchorChanged = await page
+        .evaluate(() => document.querySelectorAll('a[href*="/in/"], a[href*="/talent/profile/"]').length)
+        .then(() => true)
+        .catch(() => false);
+      if (changed || anchorChanged) break;
+      await sleep(500);
+    }
+    await sleep(500);
+    await page.evaluate(() => document.querySelectorAll("[data-hunt-next]").forEach((e) => e.removeAttribute("data-hunt-next"))).catch(() => {});
+    return { moved: true, hasMore: true, url: page.url(), reason: "moved" };
   } finally {
     void browser.close().catch(() => {});
   }
