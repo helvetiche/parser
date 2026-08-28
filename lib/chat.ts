@@ -1,11 +1,31 @@
-import { openrouterChat, type ChatCompletion } from "./openrouter";
+import {
+  openrouterChat,
+  tokenUsageFromCompletion,
+  type ChatCompletion,
+  type TokenUsage,
+} from "./openrouter";
 import { DEFAULT_MODEL } from "./models";
+
+export type ChatWithUsageResult = {
+  result: string;
+  usage: TokenUsage;
+  model: string;
+};
 
 export async function chat(
   messages: Array<{ role: string; content: string }>,
   model: string = DEFAULT_MODEL,
   systemContext?: string
-) {
+): Promise<string> {
+  const { result } = await chatWithUsage(messages, model, systemContext);
+  return result;
+}
+
+export async function chatWithUsage(
+  messages: Array<{ role: string; content: string }>,
+  model: string = DEFAULT_MODEL,
+  systemContext?: string
+): Promise<ChatWithUsageResult> {
   const base =
     "You are a precise, helpful assistant. " +
     "Guidelines:\n" +
@@ -31,5 +51,10 @@ export async function chat(
     tools: [{ type: "web_search" }],
   })) as ChatCompletion;
 
-  return data.choices?.[0]?.message?.content || "No response";
+  const usage = tokenUsageFromCompletion(data, model);
+  return {
+    result: data.choices?.[0]?.message?.content || "No response",
+    usage,
+    model: data.model || model,
+  };
 }

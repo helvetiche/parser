@@ -16,13 +16,14 @@ import type { Icon } from "@phosphor-icons/react";
 import ChatSidebar from "@/components/chat/ChatSidebar";
 import CandidatesTable from "@/components/candidates/CandidatesTable";
 import UploadResumeModal from "@/components/candidates/UploadResumeModal";
+import EditCandidateDrawer from "@/components/candidates/EditCandidateDrawer";
 import AuthGate from "@/components/auth/AuthGate";
 import LogoutButton from "@/components/auth/LogoutButton";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import ModelSelect from "@/components/ui/ModelSelect";
 import RoleDescription from "@/components/RoleDescription";
 import HuntAutomation from "@/components/HuntAutomation";
-import { deleteCandidate, parsePdfFile, type CandidatesResponse } from "@/lib/client-api";
+import { deleteCandidate, parsePdfFile, updateCandidate, type CandidatesResponse } from "@/lib/client-api";
 import type { CandidateRow } from "@/lib/candidate-schema";
 import { cacheKeys } from "@/lib/cache-keys";
 import { DEFAULT_MODEL } from "@/lib/models";
@@ -73,6 +74,7 @@ function ParserApp() {
   const [parserModel, setParserModel] = useState(DEFAULT_MODEL);
   const [pendingDelete, setPendingDelete] = useState<CandidateRow | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [editingCandidate, setEditingCandidate] = useState<CandidateRow | null>(null);
 
   const attachPdf = async (file: File | undefined) => {
     if (!file) return;
@@ -197,6 +199,7 @@ function ParserApp() {
               candidates={candidates}
               loading={listLoading}
               onDeleteRequest={setPendingDelete}
+              onEditRequest={setEditingCandidate}
             />
 
             <p className="mt-4 text-center text-xs text-gray-400">
@@ -252,6 +255,18 @@ function ParserApp() {
           busy={deleteBusy}
           onCancel={() => setPendingDelete(null)}
           onConfirm={() => void handleConfirmDelete()}
+        />
+      )}
+
+      {/* Edit candidate drawer — right slide cabinet matching review design */}
+      {editingCandidate && (
+        <EditCandidateDrawer
+          candidate={editingCandidate}
+          onClose={() => setEditingCandidate(null)}
+          onSave={async (updated) => {
+            await updateCandidate(editingCandidate.id, updated);
+            await mutateCandidates();
+          }}
         />
       )}
     </main>

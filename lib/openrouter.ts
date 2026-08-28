@@ -16,13 +16,71 @@ export class OpenRouterError extends Error {
   }
 }
 
+export type TokenUsage = {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  model?: string;
+  /** Optional OpenRouter cost in USD if provider returns it. */
+  cost?: number;
+};
+
 export type ChatCompletion = {
+  id?: string;
+  model?: string;
+  provider?: string;
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    total_tokens?: number;
+    prompt_tokens_details?: unknown;
+    completion_tokens_details?: unknown;
+    cost?: number;
+    /** Some providers nest cost differently */
+    total_cost?: number;
+  };
   choices?: Array<{
     message?: { content?: string };
     /** "length" means the output hit max_tokens and was cut off. */
     finish_reason?: string;
   }>;
 };
+
+export function tokenUsageFromCompletion(
+  data: ChatCompletion,
+  fallbackModel?: string
+): TokenUsage {
+  const u = data.usage;
+  const prompt = typeof u?.prompt_tokens === "number" ? u.prompt_tokens : 0;
+  const completion = typeof u?.completion_tokens === "number" ? u.completion_tokens : 0;
+  const total =
+    typeof u?.total_tokens === "number" ? u.total_tokens : prompt + completion;
+  const model = data.model || fallbackModel;
+  const cost =
+    typeof u?.cost === "number"
+      ? u.cost
+      : typeof u?.total_cost === "number"
+        ? u.total_cost
+        : undefined;
+  return { promptTokens: prompt, completionTokens: completion, totalTokens: total, model, cost };
+}
+
+export function emptyUsage(model?: string): TokenUsage {
+  return { promptTokens: 0, completionTokens: 0, totalTokens: 0, model };
+}
+
+export function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
+  return {
+    promptTokens: a.promptTokens + b.promptTokens,
+    completionTokens: a.completionTokens + b.completionTokens,
+    totalTokens: a.totalTokens + b.totalTokens,
+    model: b.model || a.model,
+    cost:
+      a.cost != null || b.cost != null
+        ? (a.cost ?? 0) + (b.cost ?? 0)
+        : undefined,
+  };
+}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));

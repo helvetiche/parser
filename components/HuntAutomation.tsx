@@ -4,13 +4,16 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ArrowSquareOut, CaretDown, Check, CircleNotch, Clock, CloudArrowUp, Eye, RocketLaunch, Sparkle, Target, Trash, Users, WarningCircle } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowSquareOut, CaretDown, Check, CircleNotch, Clock, CloudArrowUp, Eye, Gear, Pause, Play, RocketLaunch, SlidersHorizontal, Sparkle, Target, Trash, Users, WarningCircle } from "@phosphor-icons/react";
 import { getIdToken } from "@/lib/auth";
 import Modal, { ModalCloseButton } from "@/components/ui/Modal";
 import CandidatesTable from "@/components/candidates/CandidatesTable";
 import RoleDetailsModal from "@/components/roles/RoleDetailsModal";
+import EditCandidateDrawer from "@/components/candidates/EditCandidateDrawer";
 import { createCandidate } from "@/lib/client-api";
-import { parseProfile } from "@/lib/hunt/parse-profile";
+import { parseProfileWithUsage } from "@/lib/hunt/parse-profile";
+import type { TokenUsage } from "@/lib/openrouter";
+import { DuplicateManager, normalizeCandidateUrl } from "@/lib/hunt/duplicate-manager";
 import type {
   BrowserTab,
   BrowserTabsResult,
@@ -32,6 +35,7 @@ const SELECTED_ROLE_KEY = "hunt.selectedRoleId";
 
 const LIMIT_CANDIDATES_KEY = "hunt.maxCandidates";
 const LIMIT_PAGES_KEY = "hunt.maxPages";
+const HEADLESS_KEY = "hunt.headless";
 const DEFAULT_MAX_CANDIDATES = 25;
 const DEFAULT_MAX_PAGES = 5;
 // Slider bounds — hitting the upper bound means "unlimited" (ellipsis / ∞)
@@ -95,6 +99,58 @@ export default function HuntAutomation() {
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [scrapeError, setScrapeError] = useState<string | null>(null);
+  const [paused, setPaused] = useState(false);
+  const pausedRef = useRef(false);
+  const resumeResolverRef = useRef<(() => void) | null>(null);
+  const waitIfPaused = useCallback(async () => {
+    if (pausedRef.current) {
+      await new Promise<void>((resolve) => {
+        resumeResolverRef.current = resolve;
+      });
+    }
+  }, []);
+  const handlePause = useCallback(() => {
+    pausedRef.current = true;
+    setPaused(true);
+  }, []);
+  const handleResume = useCallback(() => {
+    pausedRef.current = false;
+    setPaused(false);
+    if (resumeResolverRef.current) {
+      resumeResolverRef.current();
+      resumeResolverRef.current = null;
+    }
+  }, []);
+  // Reset pause when run finishes or is idle
+  useEffect(() => {
+    if (!gathering && paused) {
+      pausedRef.current = false;
+      setPaused(false);
+      if (resumeResolverRef.current) {
+        resumeResolverRef.current();
+        resumeResolverRef.current = null;
+      }
+    }
+  }, [gathering, paused]);
+
+  type UsageAggregate = TokenUsage & { calls: number };
+  const emptyAgg = (): UsageAggregate => ({
+    promptTokens: 0,
+    completionTokens: 0,
+    totalTokens: 0,
+    calls: 0,
+  });
+  const addToAgg = (prev: UsageAggregate, next: TokenUsage): UsageAggregate => ({
+    promptTokens: prev.promptTokens + (next.promptTokens ?? 0),
+    completionTokens: prev.completionTokens + (next.completionTokens ?? 0),
+    totalTokens: prev.totalTokens + (next.totalTokens ?? 0),
+    calls: prev.calls + 1,
+    model: next.model ?? prev.model,
+    cost:
+      prev.cost != null || next.cost != null
+        ? (prev.cost ?? 0) + (next.cost ?? 0)
+        : undefined,
+  });
 
   // Timing per node + total automation time
   const [timings, setTimings] = useState<Partial<Record<Phase, { start: number; end?: number; durationMs?: number }>>>({});
@@ -102,11 +158,33 @@ export default function HuntAutomation() {
   const prevPhaseRef = useRef<Phase>("idle");
   // eslint-disable-next-line react-hooks/purity -- live tick for running timer
   const [nowTick, setNowTick] = useState<number>(Date.now());
+  // Token usage per AI node — aggregate input/output/total + call count
+  const [parseUsage, setParseUsage] = useState<UsageAggregate>(() => emptyAgg());
+  const [matchUsage, setMatchUsage] = useState<UsageAggregate>(() => emptyAgg());
+  // Duplicate tracking — how many profile URLs were filtered as duplicates across pages/runs
+  const [duplicateStats, setDuplicateStats] = useState<{ filtered: number; unique: number }>({ filtered: 0, unique: 0 });
+  const duplicateManagerRef = useRef<DuplicateManager | null>(null);
   // Live tick for running phase timer
   useEffect(() => {
     if (!gathering) return;
     const id = setInterval(() => setNowTick(Date.now()), 500);
     return () => clearInterval(id);
+  }, [gathering]);
+
+  // Keep top progress bar pinned above navigation when automation runs
+  useEffect(() => {
+    if (typeof document === "undefined") return;
+    if (gathering) {
+      document.body.style.paddingTop = "32px";
+      document.documentElement.style.setProperty("--hunt-running", "1");
+    } else {
+      document.body.style.paddingTop = "";
+      document.documentElement.style.removeProperty("--hunt-running");
+    }
+    return () => {
+      document.body.style.paddingTop = "";
+      document.documentElement.style.removeProperty("--hunt-running");
+    };
   }, [gathering]);
 
   const formatDuration = (ms?: number) => {
@@ -119,13 +197,25 @@ export default function HuntAutomation() {
     return `${m}m ${rs}s`;
   };
 
-  // Track phase transitions -> per-node timing
+  const formatTokens = (n: number) => {
+    if (!Number.isFinite(n) || n === 0) return "0";
+    if (n < 1000) return `${n}`;
+    if (n < 10000) return `${(n / 1000).toFixed(1)}k`;
+    if (n < 1000000) return `${Math.round(n / 1000)}k`;
+    return `${(n / 1000000).toFixed(1)}M`;
+  };
+
+  // Track phase transitions -> per-node timing + reset token aggregates on new run/idle
   useEffect(() => {
     const prev = prevPhaseRef.current;
     const now = Date.now();
     if (phase === "idle") {
       setTimings({});
       setRunStart(null);
+      setParseUsage(emptyAgg());
+      setMatchUsage(emptyAgg());
+      setDuplicateStats({ filtered: 0, unique: 0 });
+      duplicateManagerRef.current = null;
       prevPhaseRef.current = phase;
       return;
     }
@@ -163,6 +253,7 @@ export default function HuntAutomation() {
       });
       prevPhaseRef.current = phase;
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- emptyAgg is stable per render and intentionally not a dep
   }, [phase]);
 
   const totalDurationMs = useMemo(() => {
@@ -209,6 +300,23 @@ export default function HuntAutomation() {
     } catch {}
   }, [maxPages]);
 
+  // Headless toggle — when true automation runs in an invisible browser on the user's machine (no windows opening).
+  // Cookies are synced from the visible Chrome via CDP so LinkedIn auth is preserved.
+  const [headless, setHeadless] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    try {
+      const v = localStorage.getItem(HEADLESS_KEY);
+      if (v === "true") return true;
+      if (v === "false") return false;
+    } catch {}
+    return true; // default ON as requested — no windows popping
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem(HEADLESS_KEY, String(headless));
+    } catch {}
+  }, [headless]);
+
   // Persisted scraped candidates (localStorage) + the view-saved modal.
   const [saved, setSaved] = useState<SavedCandidate[]>(() => {
     if (typeof window === "undefined") return [];
@@ -228,6 +336,9 @@ export default function HuntAutomation() {
     candidate: CandidateRow;
     match: MatchResult;
   } | null>(null);
+
+  // Edit hunt candidate (local parsed, not yet in DB) — right slide cabinet
+  const [editingHuntCandidate, setEditingHuntCandidate] = useState<CandidateRow | null>(null);
 
   // Multi-select of parsed candidates + saving them to the database.
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -289,6 +400,10 @@ export default function HuntAutomation() {
     setSaved([]);
     setMatches({});
     setRoleId(null);
+    setParseUsage(emptyAgg());
+    setMatchUsage(emptyAgg());
+    setDuplicateStats({ filtered: 0, unique: 0 });
+    duplicateManagerRef.current = null;
     setPhase("idle");
     setClearOpen(false);
   };
@@ -298,8 +413,9 @@ export default function HuntAutomation() {
 
   const addParsed = (row: CandidateRow) => {
     setParsed((prev) => {
-      // Replace if the id already exists (e.g. when a later step enriches it).
-      const without = prev.filter((p) => p.id !== row.id);
+      // Replace if the normalized id already exists (covers trailing slash / www / query variants)
+      const key = normalizeCandidateUrl(row.id);
+      const without = prev.filter((p) => normalizeCandidateUrl(p.id) !== key);
       const next = [...without, row];
       try {
         localStorage.setItem(PARSED_KEY, JSON.stringify(next));
@@ -393,7 +509,10 @@ export default function HuntAutomation() {
 
   const addSaved = (p: CandidateProfileResult) => {
     setSaved((prev) => {
-      if (prev.some((s) => s.url === p.url)) return prev;
+      const key = normalizeCandidateUrl(p.url);
+      if (prev.some((s) => normalizeCandidateUrl(s.url) === key)) return prev;
+      // Also check duplicateManager for cross-page dedupe memory
+      if (duplicateManagerRef.current?.has(p.url)) return prev;
       const next: SavedCandidate[] = [...prev, { ...p, savedAt: new Date().toISOString() }];
       try {
         localStorage.setItem(SAVED_KEY, JSON.stringify(next));
@@ -473,6 +592,7 @@ export default function HuntAutomation() {
           scrapePage: selectedUrl,
           maxPerPage: effectiveMaxPerPage,
           maxCandidates: effectiveMaxPerPage,
+          headless,
         }),
       });
       const data = await res.json();
@@ -484,8 +604,48 @@ export default function HuntAutomation() {
     }
   };
 
+  // Headless combined scrape: all pages in ONE invisible browser session (no windows).
+  // Cookies are synced from visible Chrome via CDP, headless does goto + scroll + Next loop internally.
+  const doScrapeAllHeadless = async (): Promise<ScrapedCandidate[]> => {
+    if (!selectedUrl) {
+      setScrapeError("Select a tab first.");
+      return [];
+    }
+    setScrapeError(null);
+    try {
+      const token = await getIdToken();
+      if (!token) throw new Error("You are signed out. Please sign in again.");
+      const effectiveMaxPages = maxPages >= PAGES_UNLIMITED ? BACKEND_MAX_PAGES : maxPages;
+      const effectiveMaxPerPage =
+        maxCandidates >= CANDIDATES_UNLIMITED ? BACKEND_MAX_CANDIDATES : maxCandidates;
+      const res = await fetch("/api/hunt", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scrape: selectedUrl,
+          maxPages: effectiveMaxPages,
+          maxCandidates: effectiveMaxPerPage,
+          headless: true,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error ?? "Failed to scrape candidates");
+      if (typeof data.duplicatesFiltered === "number" || typeof data.debug?.duplicatesFiltered === "number") {
+        const filtered = data.duplicatesFiltered ?? data.debug?.duplicatesFiltered ?? 0;
+        const unique = data.uniqueCount ?? data.debug?.uniqueCount ?? data.count ?? 0;
+        setDuplicateStats({ filtered, unique });
+      }
+      return data.candidates as ScrapedCandidate[];
+    } catch (err) {
+      setScrapeError(err instanceof Error ? err.message : "Failed to scrape candidates (headless)");
+      return [];
+    }
+  };
+
   // STEP 3 — Scrap pagination (new) — move to next page when Step 2 is done
+  // In headless combined mode pagination is handled inside scrapeCandidatesHeadless, so this is no-op.
   const doNextPage = async (): Promise<boolean> => {
+    if (headless) return false;
     if (!selectedUrl) return false;
     try {
       const token = await getIdToken();
@@ -517,6 +677,7 @@ export default function HuntAutomation() {
     let remaining = [...list];
     try {
       while (remaining.length > 0) {
+        await waitIfPaused();
         const c = remaining[0];
         try {
           const token = await getIdToken();
@@ -524,7 +685,7 @@ export default function HuntAutomation() {
           const res = await fetch("/api/hunt", {
             method: "POST",
             headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ extract: c.url }),
+            body: JSON.stringify({ extract: c.url, headless }),
           });
           const data = await res.json();
           if (!res.ok) throw new Error(data?.error ?? "Failed to extract profile");
@@ -554,8 +715,10 @@ export default function HuntAutomation() {
     let remaining = [...profiles];
     try {
       while (remaining.length > 0) {
+        await waitIfPaused();
         const p = remaining[0];
-        const row = await parseProfile(p.raw, p.url, p.name);
+        const { row, usage } = await parseProfileWithUsage(p.raw, p.url, p.name);
+        if (usage) setParseUsage((prev) => addToAgg(prev, usage));
         addParsed(row);
         rows.push(row);
         remaining = remaining.slice(1);
@@ -567,11 +730,11 @@ export default function HuntAutomation() {
     return rows;
   };
 
-  /** Score one parsed candidate against the selected job description. */
+  /** Score one parsed candidate against the selected job description. Returns match + token usage. */
   const matchHuntCandidate = async (
     candidate: CandidateRow,
     roleId: string
-  ): Promise<MatchResult | null> => {
+  ): Promise<{ match: MatchResult; usage?: TokenUsage } | null> => {
     try {
       const token = await getIdToken();
       if (!token) throw new Error("signed out");
@@ -582,7 +745,7 @@ export default function HuntAutomation() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "Match failed");
-      return data.match as MatchResult;
+      return { match: data.match as MatchResult, usage: data.usage as TokenUsage | undefined };
     } catch {
       return null;
     }
@@ -599,9 +762,12 @@ export default function HuntAutomation() {
     let remaining = [...rows];
     try {
       while (remaining.length > 0) {
+        await waitIfPaused();
         const row = remaining[0];
-        const match = await matchHuntCandidate(row, role.id);
-        if (match) {
+        const result = await matchHuntCandidate(row, role.id);
+        if (result?.match) {
+          const { match, usage } = result;
+          if (usage) setMatchUsage((prev) => addToAgg(prev, usage));
           addMatch(row.id, role.id, role.jobTitle, match);
           // Surface the match inside the candidate's reasoning for the table.
           const scoreLine = `Match (${role.jobTitle}): ${match.score}/100 — ${match.reasoning}`;
@@ -619,19 +785,187 @@ export default function HuntAutomation() {
     }
   };
 
+  // ── Standalone single-node runners ──
+  // These let the user run a specific pipeline node on already-collected data
+  // without re-running the full 8-step hunt. Useful when scraping is stuck but
+  // parsed data already exists, or to re-match against a different JD.
+  const [standaloneError, setStandaloneError] = useState<string | null>(null);
+
+  // Unmatched for selected role: no stored match, or stored match is for a different role
+  const unmatchedCandidates = useMemo(() => {
+    if (parsed.length === 0) return [];
+    return parsed.filter((p) => {
+      const m = matches[p.id];
+      if (!m) return true;
+      if (!roleId) return false; // when no role selected, only truly un-matched count as unmatched
+      return m.roleId !== roleId;
+    });
+  }, [parsed, matches, roleId]);
+
+  const runMatchAllStandalone = async () => {
+    if (gathering) return;
+    setStandaloneError(null);
+    if (parsed.length === 0) {
+      setStandaloneError("No parsed candidates yet. Run parsing first or check local data.");
+      return;
+    }
+    const role = roles.find((r) => r.id === roleId) ?? null;
+    if (!role) {
+      setStandaloneError("Select a job description first.");
+      return;
+    }
+    setGathering(true);
+    setPhase("matching");
+    setProgress({ done: 0, total: parsed.length });
+    setScrapeError(null);
+    try {
+      await matchAll(parsed, role);
+      setPhase("done");
+    } catch (err) {
+      setStandaloneError(err instanceof Error ? err.message : "Match failed");
+      setPhase("idle");
+    } finally {
+      setGathering(false);
+      setProgress(null);
+    }
+  };
+
+  const runMatchUnmatchedStandalone = async () => {
+    if (gathering) return;
+    setStandaloneError(null);
+    if (parsed.length === 0) {
+      setStandaloneError("No parsed candidates yet. Run parsing first or check local data.");
+      return;
+    }
+    const role = roles.find((r) => r.id === roleId) ?? null;
+    if (!role) {
+      setStandaloneError("Select a job description first.");
+      return;
+    }
+    const targets = unmatchedCandidates;
+    if (targets.length === 0) {
+      setStandaloneError("All candidates already matched for this role — nothing unmatched to run.");
+      return;
+    }
+    setGathering(true);
+    setPhase("matching");
+    setProgress({ done: 0, total: targets.length });
+    setScrapeError(null);
+    try {
+      await matchAll(targets, role);
+      setPhase("done");
+      setStandaloneError(`Matched ${targets.length} unmatched candidate${targets.length === 1 ? "" : "s"} — ${parsed.length - targets.length} already matched skipped.`);
+    } catch (err) {
+      setStandaloneError(err instanceof Error ? err.message : "Match failed");
+      setPhase("idle");
+    } finally {
+      setGathering(false);
+      setProgress(null);
+    }
+  };
+
+  const runParseAllStandalone = async () => {
+    if (gathering) return;
+    setStandaloneError(null);
+    if (saved.length === 0) {
+      setStandaloneError("No saved (raw) profiles yet. Scrape candidates first.");
+      return;
+    }
+    // Only parse those not yet in parsed
+    const existingIds = new Set(parsed.map((p) => normalizeCandidateUrl(p.id)));
+    const toParse = saved.filter((s) => !existingIds.has(normalizeCandidateUrl(s.url)));
+    const targets = toParse.length > 0 ? toParse : saved;
+    if (targets.length === 0) {
+      setStandaloneError("All saved profiles already parsed.");
+      return;
+    }
+    setGathering(true);
+    setPhase("parsing");
+    setProgress({ done: 0, total: targets.length });
+    setScrapeError(null);
+    try {
+      const rows = await parseAll(targets);
+      // Optionally auto-match after parse if a role is selected
+      setPhase("done");
+      setStandaloneError(`Parsed ${rows.length} profiles. ${roleId ? "Run Match All to score them." : "Select a job description then run Match All."}`);
+    } catch (err) {
+      setStandaloneError(err instanceof Error ? err.message : "Parse failed");
+      setPhase("idle");
+    } finally {
+      setGathering(false);
+      setProgress(null);
+    }
+  };
+
+  const runScrapeOnlyStandalone = async () => {
+    if (gathering || !selectedUrl) {
+      if (!selectedUrl) setStandaloneError("Select a tab first.");
+      return;
+    }
+    setStandaloneError(null);
+    setScrapeError(null);
+    setGathering(true);
+    setPhase("scraping");
+    setProgress(null);
+    const manager = new DuplicateManager([
+      ...parsed.map((p) => normalizeCandidateUrl(p.id)),
+      ...saved.map((s) => normalizeCandidateUrl(s.url)),
+    ]);
+    try {
+      const effectiveMaxPages = maxPages >= PAGES_UNLIMITED ? BACKEND_MAX_PAGES : maxPages;
+      const effectiveMaxPerPage = maxCandidates >= CANDIDATES_UNLIMITED ? BACKEND_MAX_CANDIDATES : maxCandidates;
+      let candidates: ScrapedCandidate[] = [];
+      if (headless) {
+        candidates = await doScrapeAllHeadless();
+      } else {
+        // Non-headless single scrape loop (re-use gather logic but stop before extracting)
+        const all: ScrapedCandidate[] = [];
+        for (let pageIdx = 0; pageIdx < effectiveMaxPages; pageIdx++) {
+          await waitIfPaused();
+          setPhase(pageIdx === 0 ? "scraping" : "paginating");
+          if (pageIdx > 0) {
+            const moved = await doNextPage();
+            if (!moved) break;
+          }
+          const perPage = await doScrapePage();
+          const { unique } = manager.filter(perPage);
+          all.push(...unique);
+          if (!Number.isFinite(effectiveMaxPerPage * effectiveMaxPages) || all.length >= effectiveMaxPerPage * effectiveMaxPages) break;
+        }
+        candidates = all;
+      }
+      if (candidates.length === 0) {
+        setStandaloneError("Scrape returned 0 candidates. Check if the sourcing tab has results or try Visible mode.");
+        setPhase("idle");
+        return;
+      }
+      setStandaloneError(`Scraped ${candidates.length} candidates (headless=${headless}). Next: Extract profiles or run full hunt.`);
+      setPhase("done");
+      // Store scraped list temporarily in console for debugging — user can then run full hunt to extract
+      console.log("[standalone scrape] candidates:", candidates);
+    } catch (err) {
+      setStandaloneError(err instanceof Error ? err.message : "Scrape failed");
+      setPhase("idle");
+    } finally {
+      setGathering(false);
+      setProgress(null);
+    }
+  };
+
   /**
    * STEP 1 — Open tab (bring sourcing tab to foreground).
    * Isolated so scraping starts on a visible, focused tab — required for
    * reliable pagination clicks and lazy-load scroll in STEP 2.
    */
   const openTab = async (url: string) => {
+    if (headless) return; // headless does goto internally, no visible tab needed
     try {
       const token = await getIdToken();
       if (!token) throw new Error("You are signed out. Please sign in again.");
       const res = await fetch("/api/hunt", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ open: url }),
+        body: JSON.stringify({ open: url, headless }),
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data?.error ?? "Failed to open tab");
@@ -648,13 +982,14 @@ export default function HuntAutomation() {
    * we still return to page 1. Non-blocking — failures are ignored.
    */
   const returnToScrape = async (url: string) => {
+    if (headless) return; // nothing visible to return to in headless
     try {
       const token = await getIdToken();
       if (!token) return;
       await fetch("/api/hunt", {
         method: "POST",
         headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ returnToScrape: url }),
+        body: JSON.stringify({ returnToScrape: url, headless }),
       });
     } catch {
       /* non-blocking — done state already reached */
@@ -674,68 +1009,124 @@ export default function HuntAutomation() {
     setGathering(true);
     setScrapeError(null);
     setProgress(null);
+    setParseUsage(emptyAgg());
+    setMatchUsage(emptyAgg());
+    setDuplicateStats({ filtered: 0, unique: 0 });
+    // Seed manager with already-known candidates (cross-run dedupe: prevents re-scraping same profiles)
+    const manager = new DuplicateManager([
+      ...parsed.map((p) => normalizeCandidateUrl(p.id)),
+      ...saved.map((s) => normalizeCandidateUrl(s.url)),
+    ]);
+    duplicateManagerRef.current = manager;
+    let totalDuplicates = 0;
     try {
-      // STEP 1 — Open tab
+      // STEP 1 — Open tab (headless skips this — goto happens inside invisible browser)
       setPhase("opening");
       await openTab(selectedUrl);
 
-      // STEP 2 + STEP 3 — Explicit per-page loop per user proposal:
-      // 1) get ALL candidate URLs for the whole page (Step 2)
-      // 2) move to next page and do Step 1 (Step 3 — new)
-      // 3) loop until limit is reached (perPage * pages)
-      // This ensures if there are 5 pages, we scrap all 5 pages before parsing.
       const effectiveMaxPages = maxPages >= PAGES_UNLIMITED ? BACKEND_MAX_PAGES : maxPages;
       const effectiveMaxPerPage =
         maxCandidates >= CANDIDATES_UNLIMITED ? BACKEND_MAX_CANDIDATES : maxCandidates;
       const isUnlimitedTotal = maxCandidates >= CANDIDATES_UNLIMITED || maxPages >= PAGES_UNLIMITED;
       const totalLimit = isUnlimitedTotal ? Infinity : effectiveMaxPerPage * effectiveMaxPages;
-      const allCandidates: ScrapedCandidate[] = [];
-      const seenUrls = new Set<string>();
-      let pagesScraped = 0;
-      for (let pageIdx = 0; pageIdx < effectiveMaxPages; pageIdx++) {
-        // STEP 2 — Scrap candidates (whole page)
+
+      let cappedList: ScrapedCandidate[] = [];
+
+      if (headless) {
+        // Headless invisible mode: all pages scraped in ONE headless session (cookie-synced via CDP).
+        // No windows/tabs appear in the user's browser — runs on user's machine but invisible.
+        await waitIfPaused();
         setPhase("scraping");
-        setProgress({ done: allCandidates.length, total: Number.isFinite(totalLimit) ? totalLimit : allCandidates.length + effectiveMaxPerPage });
-        const perPageCandidates = await doScrapePage();
-        pagesScraped++;
-        // Dedup and aggregate
-        for (const c of perPageCandidates) {
-          if (!seenUrls.has(c.url)) {
-            seenUrls.add(c.url);
-            allCandidates.push(c);
+        setProgress({ done: 0, total: Number.isFinite(totalLimit) ? totalLimit : effectiveMaxPerPage });
+        const combined = await doScrapeAllHeadless();
+        if (combined.length === 0) {
+          setPhase("idle");
+          return;
+        }
+        // Cross-run dedup (already partly handled server-side, but also filter against local parsed/saved)
+        const { unique, duplicateCount } = manager.filter(combined);
+        totalDuplicates += duplicateCount;
+        setDuplicateStats({ filtered: totalDuplicates, unique: unique.length });
+        const allCandidates = unique as ScrapedCandidate[];
+        if (allCandidates.length === 0) {
+          setPhase("idle");
+          setScrapeError("All scraped candidates were duplicates of already-saved profiles.");
+          return;
+        }
+        cappedList = Number.isFinite(totalLimit) ? allCandidates.slice(0, totalLimit) : allCandidates.slice(0, 500);
+      } else {
+        // Non-headless (visible) — Explicit per-page loop per user proposal:
+        // 1) get ALL candidate URLs for the whole page (Step 2)
+        // 2) move to next page and do Step 1 (Step 3 — new)
+        // 3) loop until limit is reached (perPage * pages)
+        const allCandidates: ScrapedCandidate[] = [];
+        let pagesScraped = 0;
+        for (let pageIdx = 0; pageIdx < effectiveMaxPages; pageIdx++) {
+          await waitIfPaused();
+          // STEP 2 — Scrap candidates (whole page)
+          setPhase("scraping");
+          setProgress({ done: allCandidates.length, total: Number.isFinite(totalLimit) ? totalLimit : allCandidates.length + effectiveMaxPerPage });
+          const perPageCandidates = await doScrapePage();
+          pagesScraped++;
+          // Dedup via DuplicateManager (normalized host+path, cross-page + cross-run)
+          const { unique, duplicateCount } = manager.filter(perPageCandidates);
+          totalDuplicates += duplicateCount;
+          allCandidates.push(...unique);
+          setDuplicateStats({ filtered: totalDuplicates, unique: allCandidates.length });
+          // Even if page empty, still try pagination (don't abort on sparse pages)
+          // Check limit reached — Step 3 loop condition
+          if (Number.isFinite(totalLimit) && allCandidates.length >= totalLimit) {
+            break;
           }
+          if (pageIdx >= effectiveMaxPages - 1) break;
+          // STEP 3 — Scrap pagination (new) — move to next page when Step 2 is done
+          setPhase("paginating");
+          setProgress({ done: pagesScraped, total: effectiveMaxPages });
+          const moved = await doNextPage();
+          if (!moved) break;
         }
-        // Even if page empty, still try pagination (don't abort on sparse pages)
-        // Check limit reached — Step 3 loop condition
-        if (Number.isFinite(totalLimit) && allCandidates.length >= totalLimit) {
-          break;
+        if (allCandidates.length === 0) {
+          setPhase("idle");
+          return;
         }
-        if (pageIdx >= effectiveMaxPages - 1) break;
-        // STEP 3 — Scrap pagination (new) — move to next page when Step 2 is done
-        setPhase("paginating");
-        setProgress({ done: pagesScraped, total: effectiveMaxPages });
-        const moved = await doNextPage();
-        if (!moved) break;
+        // Final safety cap (backend hard limit 500 already, but enforce total)
+        cappedList = Number.isFinite(totalLimit) ? allCandidates.slice(0, totalLimit) : allCandidates.slice(0, 500);
       }
-      if (allCandidates.length === 0) {
-        setPhase("idle");
-        return;
-      }
-      // Final safety cap (backend hard limit 500 already, but enforce total)
-      const cappedList = Number.isFinite(totalLimit) ? allCandidates.slice(0, totalLimit) : allCandidates.slice(0, 500);
 
       // STEPS 3-5 — Open each profile → scrape → close (sequential, guaranteed close)
+      await waitIfPaused();
       setPhase("extracting");
       const profiles = await gatherRaw(cappedList);
 
       // STEP 6 — Parse all scraped profiles with AI (batch)
+      await waitIfPaused();
       setPhase("parsing");
       const rows = await parseAll(profiles);
 
       // STEP 7 — Match candidates to selected role
+      await waitIfPaused();
       setPhase("matching");
       const role = roles.find((r) => r.id === roleId) ?? null;
       await matchAll(rows, role);
+
+      // Automation bulk (2+) → direct to DB, no confirmation drawer (per user: only automation skips confirmation for bulk)
+      if (rows.length >= 2) {
+        setPhase("returning");
+        // Auto-save bulk to database in background (non-blocking for phase, but await to surface saveMsg)
+        let ok = 0;
+        let fail = 0;
+        for (const row of rows) {
+          try {
+            const candidate = { ...row };
+            delete (candidate as { id?: string }).id;
+            await createCandidate(candidate as Candidate);
+            ok++;
+          } catch {
+            fail++;
+          }
+        }
+        setSaveMsg(fail === 0 ? `Auto-saved ${ok} candidates to database (bulk automation).` : `Auto-saved ${ok}, failed ${fail} (bulk).`);
+      }
 
       // Post-7 — Return to scrap candidate page (based on pages slider)
       // After matching, navigate the sourcing tab back to its original search
@@ -784,9 +1175,56 @@ export default function HuntAutomation() {
 
   // Custom dropdown open state.
   const [menuOpen, setMenuOpen] = useState(false);
+  const [gearOpen, setGearOpen] = useState(false);
+  const [limitOpen, setLimitOpen] = useState(false);
 
   return (
     <div className="w-full">
+      {/* Global running bar — fixed above navigation, green, with progress */}
+      {gathering &&
+        typeof document !== "undefined" &&
+        createPortal(
+          <div className={`fixed inset-x-0 top-0 z-[100] flex flex-col shadow-md ${paused ? "opacity-95" : ""}`}>
+            <div className={`flex items-center justify-between px-4 py-2 text-xs font-semibold text-white ${paused ? "bg-amber-600" : "bg-emerald-600"}`}>
+              <span className="flex items-center gap-2">
+                <span className={`h-2 w-2 rounded-full bg-white ${paused ? "" : "animate-pulse"}`} />
+                {paused ? "Paused at " : "Running Automation: "}
+                {phase === "opening"
+                  ? "Opening tab"
+                  : phase === "scraping"
+                    ? "Scraping candidates"
+                    : phase === "paginating"
+                      ? "Paginating"
+                      : phase === "extracting"
+                        ? "Extracting profiles"
+                        : phase === "parsing"
+                          ? "Parsing with AI"
+                          : phase === "matching"
+                            ? "Matching"
+                            : phase === "returning"
+                              ? "Returning"
+                              : phase === "done"
+                                ? "Done"
+                                : "Running"}
+                {paused ? " — click Resume to continue" : progress ? ` — ${progress.done} / ${progress.total}` : ""}
+                {!paused && totalDurationMs != null ? ` · ${formatDuration(totalDurationMs)}` : ""}
+              </span>
+              <span className="hidden items-center gap-1.5 text-white/80 sm:flex">
+                <Clock size={12} weight="fill" />
+                {paused ? "Paused" : phase}
+              </span>
+            </div>
+            <div className={`h-1.5 w-full ${paused ? "bg-amber-700/20" : "bg-emerald-700/20"}`}>
+              <div
+                className={`h-full transition-all duration-300 ${paused ? "bg-amber-400" : "bg-emerald-400"} ${!progress && !paused ? "animate-pulse" : ""}`}
+                style={{
+                  width: progress && progress.total > 0 ? `${Math.min(100, Math.max(4, (progress.done / progress.total) * 100))}%` : gathering ? "38%" : "0%",
+                }}
+              />
+            </div>
+          </div>,
+          document.body
+        )}
       {/* Section header */}
       <div className="mb-6">
         <div className="mb-1 flex items-center gap-2.5">
@@ -898,20 +1336,171 @@ export default function HuntAutomation() {
         <button
           onClick={() => void scan()}
           disabled={scanning}
-          className="flex items-center gap-2 rounded-xl bg-gradient-to-b from-gray-700 to-gray-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+          title={scanning ? "Scanning browser tabs…" : "Refresh browser tabs"}
+          aria-label="Refresh browser tabs"
+          className="flex h-9 w-9 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900/10 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          {scanning ? (
+          <ArrowClockwise size={18} weight="bold" className={scanning ? "animate-spin" : ""} />
+        </button>
+        {/* Gear settings — single-node runners dropdown (monochromatic) */}
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setGearOpen((o) => !o)}
+            title="Settings — single node runners"
+            aria-label="Settings"
+            aria-expanded={gearOpen}
+            className="flex h-9 w-9 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900/10"
+          >
+            <Gear size={18} weight={gearOpen ? "fill" : "regular"} />
+          </button>
+          {gearOpen && (
             <>
-              <CircleNotch size={17} className="animate-spin" />
-              Scanning…
-            </>
-          ) : (
-            <>
-              <Target size={17} />
-              Scan Browser Tabs
+              <div className="fixed inset-0 z-10" onClick={() => setGearOpen(false)} />
+              <div className="absolute left-0 z-20 mt-2 w-72 overflow-hidden rounded-xl border border-gray-200 bg-white p-1.5 shadow-lg">
+                <p className="px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400">
+                  Single Node Runners
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGearOpen(false);
+                    void runScrapeOnlyStandalone();
+                  }}
+                  disabled={gathering || !target}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Users size={15} className="shrink-0 text-gray-500" />
+                  <span className="flex-1">Scrape Only</span>
+                  {!target && <span className="text-xs text-gray-400">no tab</span>}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGearOpen(false);
+                    void runParseAllStandalone();
+                  }}
+                  disabled={gathering || saved.length === 0}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Sparkle size={15} weight="fill" className="shrink-0 text-gray-500" />
+                  <span className="flex-1">Parse All Saved</span>
+                  <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600 ring-1 ring-gray-200 ring-inset">{saved.length}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGearOpen(false);
+                    void runMatchAllStandalone();
+                  }}
+                  disabled={gathering || parsed.length === 0 || !roleId}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Check size={15} weight="bold" className="shrink-0 text-gray-700" />
+                  <span className="flex-1">Match All Candidates</span>
+                  <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600 ring-1 ring-gray-200 ring-inset">{parsed.length}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setGearOpen(false);
+                    void runMatchUnmatchedStandalone();
+                  }}
+                  disabled={gathering || parsed.length === 0 || !roleId || unmatchedCandidates.length === 0}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm text-gray-700 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Sparkle size={15} weight="fill" className="shrink-0 text-gray-500" />
+                  <span className="flex-1">Match All Unmatched</span>
+                  <span className="rounded-full bg-gray-100 px-1.5 py-0.5 text-xs font-medium text-gray-600 ring-1 ring-gray-200 ring-inset">{unmatchedCandidates.length}</span>
+                </button>
+                <div className="my-1.5 h-px bg-gray-100" />
+                <button
+                  type="button"
+                  onClick={() => setHeadless((v) => !v)}
+                  className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-gray-50"
+                >
+                  <span className="flex items-center gap-2 text-sm text-gray-700">
+                    <span className={`relative inline-flex h-4 w-7 items-center rounded-full p-0.5 transition-colors ${headless ? "bg-gray-900" : "bg-gray-200"}`}>
+                      <span className={`h-3 w-3 rounded-full bg-white shadow-sm transition-transform ${headless ? "translate-x-3" : "translate-x-0"}`} />
+                    </span>
+                    Headless
+                  </span>
+                  <span className="text-xs font-medium text-gray-500">{headless ? "ON" : "OFF"}</span>
+                </button>
+              </div>
             </>
           )}
-        </button>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          {gathering && (
+            <button
+              type="button"
+              onClick={paused ? handleResume : handlePause}
+              title={paused ? "Resume automation" : "Pause automation"}
+              className="flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2 text-sm font-medium text-gray-700 shadow-sm transition-colors hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-gray-900/10"
+            >
+              {paused ? <Play size={16} weight="fill" /> : <Pause size={16} weight="fill" />}
+              {paused ? "Resume" : "Pause"}
+            </button>
+          )}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setLimitOpen((o) => !o)}
+              title="Limits — candidates per page & pages"
+              aria-label="Limits"
+              aria-expanded={limitOpen}
+              className="flex h-9 w-9 items-center justify-center rounded-xl border border-gray-200 bg-white text-gray-600 shadow-sm transition-colors hover:bg-gray-50 hover:text-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900/10"
+            >
+              <SlidersHorizontal size={18} weight={limitOpen ? "fill" : "regular"} />
+            </button>
+            {limitOpen && (
+              <>
+                <div className="fixed inset-0 z-10" onClick={() => setLimitOpen(false)} />
+                <div className="absolute right-0 z-20 mt-2 w-80 overflow-hidden rounded-xl border border-gray-200 bg-white p-3 shadow-lg">
+                  <p className="px-1 pb-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400">Limits</p>
+                  <HuntLimits
+                    maxCandidates={maxCandidates}
+                    maxPages={maxPages}
+                    onCandidatesChange={setMaxCandidates}
+                    onPagesChange={setMaxPages}
+                    disabled={gathering}
+                  />
+                  <div className="my-3 h-px bg-gray-100" />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLimitOpen(false);
+                      setClearOpen(true);
+                    }}
+                    className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm font-medium text-red-600 transition-colors hover:bg-red-50"
+                  >
+                    <Trash size={15} />
+                    Clear cache
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => void gatherCandidates()}
+            disabled={gathering || !target}
+            className="flex items-center gap-2 rounded-xl bg-gradient-to-b from-gray-700 to-gray-900 px-5 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {gathering ? (
+              <>
+                <CircleNotch size={16} className={`animate-spin ${paused ? "opacity-30" : ""}`} />
+                {paused ? "Paused" : "Running…"}
+              </>
+            ) : (
+              <>
+                <RocketLaunch size={16} weight="fill" />
+                Run AI Hunt Automation
+              </>
+            )}
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -921,44 +1510,26 @@ export default function HuntAutomation() {
         </p>
       )}
 
-      {result && result.tabs.length > 0 && (
+      {(parsed.length > 0 || saved.length > 0 || (result && result.tabs.length > 0)) && (
         <>
-          {/* Stepper on top of the candidate table */}
-          <SourcingPanel
-            target={target}
-            phase={phase}
-            gathering={gathering}
-            progress={progress}
-            onStart={() => void gatherCandidates()}
-            roles={roles}
-            rolesLoading={rolesLoading}
-            roleId={roleId}
-            onSelectRole={setRoleId}
-            timings={timings}
-            totalDurationMs={totalDurationMs}
-            formatDuration={formatDuration}
-            nowTick={nowTick}
-          />
+          {standaloneError && (
+            <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-800 ring-1 ring-amber-100 ring-inset">{standaloneError}</p>
+          )}
+          {phase === "done" && !standaloneError && !gathering && (
+            <p className="mt-4 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-medium text-emerald-700 ring-1 ring-emerald-100 ring-inset">Node complete — check table below.</p>
+          )}
           {/* Same table layout as the Candidates tab — parsed profiles from localStorage */}
           <div className="mt-4">
             <CandidatesTable
               candidates={parsed}
               loading={false}
               onDeleteRequest={() => {}}
+              onEditRequest={setEditingHuntCandidate}
               selectable
               selectedIds={selectedIds}
               onToggleRow={toggleRow}
               onToggleAll={toggleAll}
               matchScores={matchScores}
-              toolbarExtra={
-                <HuntLimits
-                  maxCandidates={maxCandidates}
-                  maxPages={maxPages}
-                  onCandidatesChange={setMaxCandidates}
-                  onPagesChange={setMaxPages}
-                  disabled={gathering}
-                />
-              }
               detailFooter={(c) => {
                 const m = matches[c.id];
                 if (!m) return null;
@@ -1022,14 +1593,6 @@ export default function HuntAutomation() {
                       </>
                     )}
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => setClearOpen(true)}
-                    className="flex items-center gap-1.5 rounded-lg border border-red-200 px-3 py-2 text-xs font-medium text-red-600 transition-colors hover:bg-red-50"
-                  >
-                    <Trash size={14} />
-                    Clear Local Data
-                  </button>
                 </div>
               }
             />
@@ -1086,6 +1649,18 @@ export default function HuntAutomation() {
         />
       )}
 
+      {/* Edit hunt candidate — right slide cabinet, updates local parsed */}
+      {editingHuntCandidate && (
+        <EditCandidateDrawer
+          candidate={editingHuntCandidate}
+          onClose={() => setEditingHuntCandidate(null)}
+          onSave={async (updated) => {
+            const row: CandidateRow = { ...updated, id: editingHuntCandidate.id } as CandidateRow;
+            addParsed(row);
+          }}
+        />
+      )}
+
       {/* Confirm clearing all local hunt data */}
       {clearOpen && (
         <ClearConfirmModal
@@ -1097,9 +1672,6 @@ export default function HuntAutomation() {
   );
 }
 
-// Revamped 8-step labels — explicit pagination per user proposal:
-// 1 Open Tab → 2 Scrap candidates (whole page) → 3 Scrap pagination (new) → 4 Open Profile → 5 Scrape Profile → 6 Close Tab → 7 Parse AI → 8 Match
-const STEP_LABELS = ["Open Tab", "Scrap Candidates", "Scrap Pagination", "Open Profile", "Scrape Profile", "Close Tab", "Parse AI", "Match"];
 
 function RoleDropdown({
   roles,
@@ -1280,390 +1852,7 @@ function HuntLimits({
   );
 }
 
-function SourcingPanel({
-  target,
-  phase,
-  gathering,
-  progress,
-  onStart,
-  roles,
-  rolesLoading,
-  roleId,
-  onSelectRole,
-  timings,
-  totalDurationMs,
-  formatDuration,
-  nowTick,
-}: {
-  target: BrowserTab | null;
-  phase: Phase;
-  gathering: boolean;
-  progress: { done: number; total: number } | null;
-  onStart: () => void;
-  roles: RoleRow[];
-  rolesLoading: boolean;
-  roleId: string | null;
-  onSelectRole: (id: string) => void;
-  timings: Partial<Record<Phase, { start: number; end?: number; durationMs?: number }>>;
-  totalDurationMs?: number;
-  formatDuration: (ms?: number) => string;
-  nowTick: number;
-}) {
-  // Modern grouped stepper — 4 top-level nodes, Getting Candidates groups 5 sub-steps
-  const phaseOrder: Phase[] = useMemo(() => ["idle", "opening", "scraping", "paginating", "extracting", "parsing", "matching", "returning", "done"], []);
-  const orderIdx = useCallback((p: Phase) => phaseOrder.indexOf(p), [phaseOrder]);
-  const isAfter = useCallback((a: Phase, b: Phase) => orderIdx(a) > orderIdx(b), [orderIdx]);
 
-  const getPhaseDuration = useCallback(
-    (p: Phase) => {
-      const t = timings[p];
-      if (t?.durationMs != null) return t.durationMs;
-      if (t?.start && gathering && phase === p) return nowTick - t.start;
-      return undefined;
-    },
-    [timings, gathering, phase, nowTick]
-  );
-
-  const gettingPhases: Phase[] = useMemo(() => ["scraping", "paginating", "extracting"] as Phase[], []);
-  const gettingActive = gettingPhases.includes(phase);
-  const gettingDone = isAfter(phase, "extracting") || phase === "done" || phase === "returning" || phase === "parsing" || phase === "matching";
-  const gettingStatus: "done" | "active" | "upcoming" = gettingDone ? "done" : gettingActive ? "active" : "upcoming";
-  // Total for Getting Candidates = sum of its 3 phase durations (or live)
-  const gettingDuration = useMemo(() => {
-    let sum = 0;
-    let has = false;
-    for (const p of gettingPhases) {
-      const d = getPhaseDuration(p);
-      if (d != null) {
-        sum += d;
-        has = true;
-      }
-    }
-    return has ? sum : undefined;
-  }, [gettingPhases, getPhaseDuration]);
-
-  // Keep legacy stepStatus for old Stepper compatibility if needed, but new ModernStepper uses grouped logic
-  const stepStatus = (idx: number): "done" | "active" | "upcoming" => {
-    if (idx === 1) {
-      if (!target) return "active";
-      if (phase === "opening") return "active";
-      return "done";
-    }
-    if (idx === 2) {
-      if (!target) return "upcoming";
-      if (phase === "opening") return "upcoming";
-      if (phase === "scraping") return "active";
-      if (
-        phase === "paginating" ||
-        phase === "extracting" ||
-        phase === "parsing" ||
-        phase === "matching" ||
-        phase === "returning" ||
-        phase === "done"
-      )
-        return "done";
-      return "upcoming";
-    }
-    if (idx === 3) {
-      if (!target) return "upcoming";
-      if (phase === "scraping" || phase === "opening" || phase === "idle") return "upcoming";
-      if (phase === "paginating") return "active";
-      if (
-        phase === "extracting" ||
-        phase === "parsing" ||
-        phase === "matching" ||
-        phase === "returning" ||
-        phase === "done"
-      )
-        return "done";
-      return "upcoming";
-    }
-    if (idx === 4 || idx === 5 || idx === 6) {
-      if (phase === "scraping" || phase === "paginating" || phase === "opening" || phase === "idle") return "upcoming";
-      if (phase === "extracting") return "active";
-      if (phase === "parsing" || phase === "matching" || phase === "returning" || phase === "done") return "done";
-      return "upcoming";
-    }
-    if (idx === 7) {
-      if (phase === "parsing") return "active";
-      if (phase === "matching" || phase === "returning" || phase === "done") return "done";
-      return "upcoming";
-    }
-    if (idx === 8) {
-      if (phase === "matching") return "active";
-      if (phase === "returning" || phase === "done") return "done";
-      return "upcoming";
-    }
-    return "upcoming";
-  };
-
-  // Helpers for modern grouped stepper
-  const getDuration = (p: Phase) => getPhaseDuration(p);
-  const gettingDurationMs = gettingDuration;
-  const openDuration = getDuration("opening");
-  const parseDuration = getDuration("parsing");
-  const matchDuration = getDuration("matching");
-
-  return (
-    <div className="overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm backdrop-blur">
-      {/* Header: Pipeline title + total time + controls */}
-      <div className="flex flex-col gap-3 border-b border-gray-100 px-5 py-4">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-3">
-            <h3 className="text-sm font-semibold tracking-tight text-gray-900">Automation Pipeline</h3>
-            <span className="inline-flex items-center gap-1.5 rounded-full bg-gray-900 px-2.5 py-1 text-xs font-medium text-white">
-              <Clock size={12} weight="fill" />
-              {totalDurationMs != null ? formatDuration(totalDurationMs) : "—"} total
-            </span>
-            {gathering && <span className="h-2 w-2 animate-pulse rounded-full bg-emerald-500" />}
-          </div>
-          <div className="flex shrink-0 items-center gap-3">
-            <RoleDropdown roles={roles} loading={rolesLoading} roleId={roleId} onSelectRole={onSelectRole} />
-            <button
-              type="button"
-              onClick={onStart}
-              disabled={gathering || !target}
-              className="flex items-center gap-2 rounded-xl bg-gradient-to-b from-gray-700 to-gray-900 px-5 py-2 text-sm font-medium text-white shadow-sm transition-all duration-150 hover:shadow-md active:scale-[0.98] disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {gathering ? (
-                <>
-                  <CircleNotch size={17} className="animate-spin" />
-                  Running…
-                </>
-              ) : (
-                <>
-                  <RocketLaunch size={17} weight="fill" />
-                  Start Hunt Automation
-                </>
-              )}
-            </button>
-          </div>
-        </div>
-
-        {/* n8n linear stepper — 4 nodes, Getting Candidates is single process with 5 sub-steps */}
-        <div className="relative pt-2">
-          {/* Linear connector — n8n style */}
-          <div className="absolute left-6 right-6 top-[26px] hidden h-0.5 bg-gradient-to-r from-gray-200 via-gray-300 to-gray-200 sm:block" aria-hidden />
-          <div className="absolute bottom-6 left-6 top-[26px] w-0.5 bg-gradient-to-b from-gray-200 to-gray-300 sm:hidden" aria-hidden />
-
-          <div className="relative flex flex-col gap-4 sm:flex-row sm:items-stretch sm:gap-3">
-            {/* 1. Open Tab — n8n Trigger Node — content top-aligned */}
-            <div className="relative flex flex-1 flex-col gap-2">
-              <div className={`flex flex-1 items-start gap-3 rounded-xl border bg-white px-3 py-3 shadow-sm transition-all ${phase === "opening" ? "border-[#ff6d5a] shadow-md ring-2 ring-[#ff6d5a]/20" : orderIdx(phase) > orderIdx("opening") ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
-                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border-2 ${phase === "opening" ? "border-[#ff6d5a] bg-[#ff6d5a] text-white" : orderIdx(phase) > orderIdx("opening") ? "border-emerald-500 bg-emerald-500 text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
-                  {orderIdx(phase) > orderIdx("opening") ? <Check size={16} weight="bold" /> : phase === "opening" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Target size={16} weight="fill" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate text-sm font-semibold ${phase === "opening" ? "text-gray-900" : orderIdx(phase) > orderIdx("opening") ? "text-emerald-900" : "text-gray-700"}`}>Open Tab</div>
-                  <div className="flex items-center gap-1.5">
-                    <Clock size={10} className="text-gray-400" />
-                    <span className="text-xs tabular-nums text-gray-500">{formatDuration(openDuration)}</span>
-                    {phase === "opening" && gathering && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff6d5a]" />}
-                  </div>
-                </div>
-                <div className={`hidden h-2 w-2 shrink-0 rounded-full sm:block mt-4 ${phase === "opening" ? "bg-[#ff6d5a] animate-pulse" : orderIdx(phase) > orderIdx("opening") ? "bg-emerald-500" : "bg-gray-200"}`} />
-              </div>
-              <div className="hidden justify-center sm:flex">
-                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">1</span>
-              </div>
-            </div>
-
-            {/* 2. Getting Candidates — n8n grouped node (single process, 5 sub-nodes linear inside) */}
-            <div className="relative flex flex-[2] flex-col gap-2">
-              <div className={`flex flex-1 flex-col justify-center rounded-xl border bg-white p-3 shadow-sm transition-all ${gettingStatus === "active" ? "border-[#ff6d5a] shadow-md ring-2 ring-[#ff6d5a]/20" : gettingStatus === "done" ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <div className={`flex h-10 w-10 items-center justify-center rounded-lg border-2 ${gettingStatus === "done" ? "border-emerald-500 bg-emerald-500 text-white" : gettingStatus === "active" ? "border-[#ff6d5a] bg-[#ff6d5a] text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
-                      {gettingStatus === "done" ? <Check size={16} weight="bold" /> : gettingStatus === "active" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Users size={16} weight="fill" />}
-                    </div>
-                    <div>
-                      <div className={`text-sm font-semibold ${gettingStatus === "active" ? "text-gray-900" : gettingStatus === "done" ? "text-emerald-900" : "text-gray-700"}`}>Getting Candidates</div>
-                      <div className="flex items-center gap-1.5">
-                        <Clock size={10} className="text-gray-400" />
-                        <span className="text-xs tabular-nums text-gray-500">{formatDuration(gettingDurationMs)}</span>
-                        {gettingStatus === "active" && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#ff6d5a]" />}
-                      </div>
-                    </div>
-                  </div>
-                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${gettingStatus === "done" ? "bg-emerald-500 text-white" : gettingStatus === "active" ? "bg-[#ff6d5a] text-white" : "bg-gray-100 text-gray-500"}`}>5 steps</span>
-                </div>
-                {/* n8n sub-pipeline — linear 5 nodes */}
-                <div className="relative mt-3 flex items-center gap-1 rounded-lg border border-dashed border-gray-200 bg-gray-50/70 p-2">
-                  <div className="absolute left-4 right-4 top-1/2 hidden h-px -translate-y-1/2 bg-gray-200 sm:block" aria-hidden />
-                  {[
-                    { label: "Scrap\ncandidates", phase: "scraping" as Phase },
-                    { label: "Scrap\npagination", phase: "paginating" as Phase },
-                    { label: "Open\nprofile", phase: "extracting" as Phase },
-                    { label: "Scrape\nprofile", phase: "extracting" as Phase },
-                    { label: "Close\ntab", phase: "extracting" as Phase },
-                  ].map((sub, i) => {
-                    const subDuration = getDuration(sub.phase);
-                    const isActive = phase === sub.phase;
-                    const done = sub.phase === "extracting" ? isAfter(phase, "extracting") || phase === "parsing" || phase === "matching" || phase === "returning" || phase === "done" : isAfter(phase, sub.phase);
-                    const active = sub.phase === "extracting" ? phase === "extracting" : isActive;
-                    return (
-                      <div key={sub.label + i} className="relative flex flex-1 flex-col items-center gap-1">
-                        <div className={`relative z-10 flex h-7 w-7 items-center justify-center rounded-full border-2 bg-white text-[11px] font-bold shadow-sm ${done ? "border-emerald-500 bg-emerald-500 text-white" : active ? "border-[#ff6d5a] bg-[#ff6d5a] text-white" : "border-gray-200 bg-white text-gray-400"}`}>
-                          {done ? "✓" : active && gathering ? <CircleNotch size={12} className="animate-spin" /> : i + 1}
-                        </div>
-                        <span className={`whitespace-pre text-center text-[10px] font-medium leading-tight ${active ? "text-gray-900" : done ? "text-emerald-800" : "text-gray-500"}`}>{sub.label}</span>
-                        <span className="text-[10px] tabular-nums text-gray-400">{formatDuration(subDuration)}</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              <div className="hidden justify-center sm:flex">
-                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">2</span>
-              </div>
-            </div>
-
-            {/* 3. Parse AI — n8n AI Node — content top-aligned */}
-            <div className="relative flex flex-1 flex-col gap-2">
-              <div className={`flex flex-1 items-start gap-3 rounded-xl border bg-white px-3 py-3 shadow-sm transition-all ${phase === "parsing" ? "border-[#8b5cf6] shadow-md ring-2 ring-[#8b5cf6]/20" : orderIdx(phase) > orderIdx("parsing") ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
-                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border-2 ${phase === "parsing" ? "border-[#8b5cf6] bg-[#8b5cf6] text-white" : orderIdx(phase) > orderIdx("parsing") ? "border-emerald-500 bg-emerald-500 text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
-                  {orderIdx(phase) > orderIdx("parsing") ? <Check size={16} weight="bold" /> : phase === "parsing" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Sparkle size={16} weight="fill" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate text-sm font-semibold ${phase === "parsing" ? "text-gray-900" : orderIdx(phase) > orderIdx("parsing") ? "text-emerald-900" : "text-gray-700"}`}>Parse AI</div>
-                  <div className="flex items-center gap-1.5">
-                    <Clock size={10} className="text-gray-400" />
-                    <span className="text-xs tabular-nums text-gray-500">{formatDuration(parseDuration)}</span>
-                    {phase === "parsing" && gathering && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#8b5cf6]" />}
-                  </div>
-                </div>
-                <div className={`hidden h-2 w-2 shrink-0 rounded-full sm:block mt-4 ${phase === "parsing" ? "bg-[#8b5cf6] animate-pulse" : orderIdx(phase) > orderIdx("parsing") ? "bg-emerald-500" : "bg-gray-200"}`} />
-              </div>
-              <div className="hidden justify-center sm:flex">
-                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">3</span>
-              </div>
-            </div>
-
-            {/* 4. Match — n8n Output Node — content top-aligned */}
-            <div className="relative flex flex-1 flex-col gap-2">
-              <div className={`flex flex-1 items-start gap-3 rounded-xl border bg-white px-3 py-3 shadow-sm transition-all ${phase === "matching" ? "border-gray-900 shadow-md ring-2 ring-gray-900/10" : orderIdx(phase) > orderIdx("matching") ? "border-emerald-300 bg-emerald-50/50" : "border-gray-200"}`}>
-                <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border-2 ${phase === "matching" ? "border-gray-900 bg-gray-900 text-white" : orderIdx(phase) > orderIdx("matching") ? "border-emerald-500 bg-emerald-500 text-white" : "border-gray-200 bg-gray-50 text-gray-400"}`}>
-                  {orderIdx(phase) > orderIdx("matching") ? <Check size={16} weight="bold" /> : phase === "matching" && gathering ? <CircleNotch size={16} className="animate-spin" /> : <Check size={16} weight="bold" />}
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className={`truncate text-sm font-semibold ${phase === "matching" ? "text-gray-900" : orderIdx(phase) > orderIdx("matching") ? "text-emerald-900" : "text-gray-700"}`}>Match</div>
-                  <div className="flex items-center gap-1.5">
-                    <Clock size={10} className="text-gray-400" />
-                    <span className="text-xs tabular-nums text-gray-500">{formatDuration(matchDuration)}</span>
-                    {phase === "matching" && gathering && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gray-900" />}
-                  </div>
-                </div>
-                <div className={`hidden h-2 w-2 shrink-0 rounded-full sm:block mt-4 ${phase === "matching" ? "bg-gray-900 animate-pulse" : orderIdx(phase) > orderIdx("matching") ? "bg-emerald-500" : "bg-gray-200"}`} />
-              </div>
-              <div className="hidden justify-center sm:flex">
-                <span className="rounded-full bg-gray-900 px-2 py-0.5 text-[10px] font-medium text-white">4</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Legacy horizontal stepper kept hidden for a11y - grouped view is primary */}
-        <div className="hidden">
-          <Stepper statusFor={stepStatus} running={gathering} />
-        </div>
-      </div>
-
-      {/* Progress detail — maps to 8 explicit steps (pagination is Step 3) */}
-      {gathering && progress && (
-        <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
-          {phase === "opening"
-            ? "Step 1 — Opening sourcing tab…"
-            : phase === "scraping"
-              ? "Step 2 — Scraping candidates (whole page)…"
-              : phase === "paginating"
-                ? "Step 3 — Scraping pagination (Next)…"
-                : phase === "extracting"
-                  ? "Steps 4-6 — Opening profile → Scraping → Closing (sequential)…"
-                  : phase === "parsing"
-                    ? "Step 7 — Parsing profiles with AI (batch)…"
-                    : phase === "returning"
-                      ? "Returning to scrap candidate page…"
-                      : "Step 8 — Matching candidates to job description…"}{" "}
-          · {progress.done} / {progress.total}
-        </p>
-      )}
-      {/* When scraping has a total but extraction hasn't started, show scrape count without progress bar */}
-      {gathering && !progress && phase === "scraping" && (
-        <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
-          Step 2 — Scraping candidates (whole page)…
-        </p>
-      )}
-      {gathering && !progress && phase === "paginating" && (
-        <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
-          Step 3 — Scraping pagination — moving to next page…
-        </p>
-      )}
-      {gathering && phase === "returning" && !progress && (
-        <p className="border-t border-gray-100 px-4 py-2.5 text-xs text-gray-500">
-          Returning to scrap candidate page…
-        </p>
-      )}
-      {phase === "done" && (
-        <p className="border-t border-gray-100 px-4 py-2.5 text-xs font-medium text-emerald-600">
-          Done — steps 1-8 complete: tab opened, candidates scraped across all pages, pagination handled, each profile opened → scraped → closed, AI-parsed, and matched.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function Stepper({
-  statusFor,
-  running,
-}: {
-  statusFor: (idx: number) => "done" | "active" | "upcoming";
-  running: boolean;
-}) {
-  return (
-    <ol className="flex items-center gap-2">
-      {STEP_LABELS.map((label, i) => {
-        const idx = i + 1;
-        const status = statusFor(idx);
-        const connectorDone = statusFor(idx) === "done";
-        return (
-          <li key={label} className="flex items-center gap-2">
-            <div className="flex items-center gap-2">
-              <span
-                className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ring-1 ring-inset transition-colors ${
-                  status === "done"
-                    ? "bg-gradient-to-b from-gray-700 to-gray-900 text-white ring-transparent"
-                    : status === "active"
-                      ? "bg-gray-900/10 text-gray-900 ring-gray-900/20"
-                      : "bg-gray-50 text-gray-400 ring-gray-200"
-                }`}
-              >
-                {status === "done" ? (
-                  "✓"
-                ) : status === "active" && running ? (
-                  <CircleNotch size={14} className="animate-spin" />
-                ) : (
-                  idx
-                )}
-              </span>
-              <span
-                className={`text-xs font-medium ${
-                  status === "upcoming" ? "text-gray-400" : "text-gray-900"
-                }`}
-              >
-                {label}
-              </span>
-            </div>
-            {idx < STEP_LABELS.length && (
-              <span
-                className={`h-px w-6 sm:w-10 ${connectorDone ? "bg-gray-900" : "bg-gray-200"}`}
-              />
-            )}
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
 
 function CandidateProfileModal({
   profile,

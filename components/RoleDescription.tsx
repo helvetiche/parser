@@ -11,6 +11,7 @@ import {
   FileArrowUp,
   Lightning,
   ListChecks,
+  NotePencil,
   Star,
   Trash,
   Tray,
@@ -21,7 +22,6 @@ import type { Icon } from "@phosphor-icons/react";
 import Modal, { ModalCloseButton } from "@/components/ui/Modal";
 import ConfirmDialog from "@/components/ui/ConfirmDialog";
 import Dropzone, { DropzoneBusy, DropzoneIdle } from "@/components/ui/Dropzone";
-import UploadQueuePanel from "@/components/ui/UploadQueuePanel";
 import Skeleton from "@/components/ui/Skeleton";
 import TimelineList from "@/components/ui/TimelineList";
 import TableSearch from "@/components/ui/TableSearch";
@@ -30,8 +30,10 @@ import MatchBadge, { MatchBadgeError } from "@/components/roles/MatchBadge";
 import RoleDetailsModal from "@/components/roles/RoleDetailsModal";
 import SubmitCandidatesModal from "@/components/roles/SubmitCandidatesModal";
 import { getInitials } from "@/components/candidates/CandidatesTable";
-import { useUploadQueue } from "@/hooks/useUploadQueue";
-import type { RoleData, RoleRow, SavedEvaluation } from "@/lib/role-schema";
+import { useRoleReviewQueue } from "@/hooks/useReviewQueue";
+import ReviewRoleDrawer from "@/components/roles/ReviewRoleDrawer";
+import EditRoleDrawer from "@/components/roles/EditRoleDrawer";
+import type { RoleRow, SavedEvaluation } from "@/lib/role-schema";
 import type { MatchResult } from "@/lib/match-schema";
 import type { CandidateRow } from "@/lib/candidate-schema";
 import {
@@ -40,6 +42,7 @@ import {
   extractRoleFromText,
   matchCandidateToRoles,
   parsePdfFile,
+  updateRole,
   type CandidatesResponse,
   type RolesResponse,
 } from "@/lib/client-api";
@@ -91,6 +94,7 @@ export default function RoleDescription() {
   const [parserModel, setParserModel] = useState(DEFAULT_MODEL);
   const [pendingDelete, setPendingDelete] = useState<RoleRow | null>(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  const [editingRole, setEditingRole] = useState<RoleRow | null>(null);
   const [detailsRoleId, setDetailsRoleId] = useState<string | null>(null);
   const [submitOpen, setSubmitOpen] = useState(false);
 
@@ -146,17 +150,11 @@ export default function RoleDescription() {
     setMatchErrors({});
   };
 
-  const queue = useUploadQueue({
-    // Parse → extract → persist pipeline for one job-description PDF.
-    runJob: async (file) => {
-      const text = await parsePdfFile(file);
-      const role: RoleData = await extractRoleFromText(text, parserModel);
-      await createRole(role);
-      await mutateRoles();
-    },
-    onAllDone: () => setUploadOpen(false),
-  });
-  const uploading = queue.extracting;
+  const review = useRoleReviewQueue();
+  const [savingRole, setSavingRole] = useState(false);
+  const [bulkRoleSaving, setBulkRoleSaving] = useState(false);
+  const [bulkRoleProgress, setBulkRoleProgress] = useState<{ done: number; total: number } | null>(null);
+  const uploading = review.extracting || savingRole || bulkRoleSaving;
 
   const handleFiles = (files: File[]) => {
     const pdfs = files.filter((f) => f.type === "application/pdf");
@@ -171,7 +169,60 @@ export default function RoleDescription() {
       skipped > 0 ? `${skipped} non-PDF file${skipped > 1 ? "s were" : " was"} skipped` : null
     );
 
-    queue.stage(pdfs);
+    if (pdfs.length >= 2) {
+      void handleBulkRoleAuto(pdfs);
+      return;
+    }
+    void review.stage(pdfs, parserModel);
+  };
+
+  const handleBulkRoleAuto = async (pdfs: File[]) => {
+    setBulkRoleSaving(true);
+    setBulkRoleProgress({ done: 0, total: pdfs.length });
+    let fail = 0;
+    for (let i = 0; i < pdfs.length; i++) {
+      try {
+        const text = await parsePdfFile(pdfs[i]);
+        const role = await extractRoleFromText(text, parserModel);
+        await createRole(role);
+      } catch (err) {
+        fail++;
+        setError(err instanceof Error ? err.message : "Bulk save failed");
+      }
+      setBulkRoleProgress({ done: i + 1, total: pdfs.length });
+    }
+    await mutateRoles();
+    setBulkRoleSaving(false);
+    setBulkRoleProgress(null);
+    if (fail === 0) setUploadOpen(false);
+  };
+
+  const handleSaveRole = async () => {
+    if (!review.current) return;
+    setSavingRole(true);
+    const ok = await review.confirmCurrent(async (r) => {
+      await createRole(r);
+      await mutateRoles();
+    });
+    setSavingRole(false);
+    if (ok && review.items.length === 1) {
+      setTimeout(() => setUploadOpen(false), 0);
+    }
+  };
+  const handleSaveRoleAndNext = async () => {
+    if (!review.current) return;
+    setSavingRole(true);
+    await review.confirmCurrent(async (r) => {
+      await createRole(r);
+      await mutateRoles();
+    });
+    setSavingRole(false);
+  };
+  const handleDiscardRole = () => {
+    review.discardCurrent();
+  };
+  const handleCloseReview = () => {
+    review.clear();
   };
 
   const handleConfirmDelete = async () => {
@@ -258,6 +309,7 @@ export default function RoleDescription() {
         roles={sortedRoles}
         loading={listLoading}
         onDeleteRequest={setPendingDelete}
+        onEditRequest={setEditingRole}
         onSelectRequest={(r) => setDetailsRoleId(r.id)}
         candidates={candidates}
         activeCandidate={selectedCandidate}
@@ -296,75 +348,132 @@ export default function RoleDescription() {
         );
       })()}
 
-      {/* Upload modal */}
+      {/* Upload modal — now with review drawer before save */}
       {uploadOpen && (
-        <Modal
-          labelledBy="upload-role-modal-title"
-          onClose={() => setUploadOpen(false)}
-          busy={uploading}
-        >
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h3
-                id="upload-role-modal-title"
-                className="text-lg font-semibold tracking-tight text-gray-900"
-              >
-                Upload Job Description
-              </h3>
-              <p className="mt-1 text-sm text-gray-500">
-                Drop job description PDFs and AI structures each role.
-              </p>
+        <>
+          <Modal
+            labelledBy="upload-role-modal-title"
+            onClose={() => {
+              if (review.hasPending) review.clear();
+              setUploadOpen(false);
+            }}
+            busy={uploading}
+          >
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 id="upload-role-modal-title" className="text-lg font-semibold tracking-tight text-gray-900">
+                  Upload Job Description
+                </h3>
+                <p className="mt-1 text-sm text-gray-500">Drop JD PDFs — review & edit before saving.</p>
+              </div>
+              <ModalCloseButton
+                onClose={() => {
+                  if (review.hasPending) review.clear();
+                  setUploadOpen(false);
+                }}
+                disabled={uploading}
+              />
             </div>
-            <ModalCloseButton onClose={() => setUploadOpen(false)} disabled={uploading} />
-          </div>
 
-          <Dropzone onFiles={handleFiles} busy={uploading} multiple>
-            {uploading ? (
-              <DropzoneBusy
-                message={
-                  <>
-                    Processing{" "}
-                    {Math.min(
-                      queue.jobs.filter((j) => j.status !== "staged").length + 1,
-                      queue.jobs.length
-                    )}{" "}
-                    of {queue.jobs.length}…
-                  </>
-                }
-              />
-            ) : (
-              <DropzoneIdle
-                icon={<FileArrowUp size={24} />}
-                title="Drop job description PDFs here"
-                subtitle="or click to browse — bulk uploads supported"
-              />
+            <Dropzone onFiles={handleFiles} busy={review.extracting || bulkRoleSaving} multiple>
+              {bulkRoleSaving && bulkRoleProgress ? (
+                <DropzoneBusy
+                  message={
+                    <>
+                      Bulk saving {bulkRoleProgress.done} of {bulkRoleProgress.total} directly to database…
+                      <span className="mt-0.5 block text-xs font-normal text-gray-400">2+ files → automated, no review</span>
+                    </>
+                  }
+                />
+              ) : review.extracting ? (
+                <DropzoneBusy
+                  message={
+                    <>
+                      Extracting {review.items.filter((i) => i.status !== "review").length} of {review.items.length}…
+                      <span className="mt-0.5 block text-xs font-normal text-gray-400">Review drawer will open next</span>
+                    </>
+                  }
+                />
+              ) : (
+                <DropzoneIdle
+                  icon={<FileArrowUp size={24} />}
+                  title="Drop job description PDFs here"
+                  subtitle="or click to browse — bulk uploads supported"
+                />
+              )}
+            </Dropzone>
+
+            {review.items.length > 0 && (
+              <div className="mt-4 max-h-44 overflow-y-auto rounded-xl border border-gray-100">
+                <div className="divide-y divide-gray-50">
+                  {review.items.map((it, idx) => (
+                    <div key={it.id} className="flex items-center gap-2.5 px-3 py-2">
+                      <span
+                        className={`flex h-6 w-6 items-center justify-center rounded-full text-xs font-bold ${it.status === "review" ? "bg-amber-100 text-amber-700" : it.status === "failed" ? "bg-red-100 text-red-600" : "bg-gray-100 text-gray-400"}`}
+                      >
+                        {idx + 1}
+                      </span>
+                      <span className="flex-1 truncate text-xs font-medium text-gray-700">{it.fileName}</span>
+                      {it.status === "review" && (
+                        <button
+                          onClick={() => review.setCurrent(idx)}
+                          className={`rounded-lg px-2 py-1 text-xs font-medium ring-1 ring-inset ${idx === review.currentIdx ? "bg-gray-900 text-white ring-gray-900" : "bg-white text-gray-600 ring-gray-200 hover:bg-gray-50"}`}
+                        >
+                          {idx === review.currentIdx ? "Editing" : "Review"}
+                        </button>
+                      )}
+                      {it.status === "failed" && (
+                        <span className="max-w-[40%] truncate text-xs text-red-500" title={it.error}>
+                          {it.error ?? "Failed"}
+                        </span>
+                      )}
+                      {it.status === "extracting" && <span className="text-xs text-gray-400">Extracting…</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
             )}
-          </Dropzone>
 
-          <UploadQueuePanel queue={queue} />
+            {/* Parser model picker — locked while a batch is running */}
+            <div className="mt-4">
+              <label className="mb-1.5 flex items-center gap-1.5 text-[13px] font-semibold tracking-wider text-gray-500 uppercase">
+                <Cpu size={13} />
+                Parser model
+              </label>
+              <ModelSelect
+                value={parserModel}
+                onChange={setParserModel}
+                disabled={uploading}
+                ariaLabel="Job description parser model"
+                title="Model used to parse job descriptions"
+              />
+            </div>
 
-          {/* Parser model picker — locked while a batch is running */}
-          <div className="mt-4">
-            <label className="mb-1.5 flex items-center gap-1.5 text-[13px] font-semibold tracking-wider text-gray-500 uppercase">
-              <Cpu size={13} />
-              Parser model
-            </label>
-            <ModelSelect
-              value={parserModel}
-              onChange={setParserModel}
-              disabled={uploading}
-              ariaLabel="Job description parser model"
-              title="Model used to parse job descriptions"
+            {error && (
+              <p className="mt-4 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2.5 text-xs leading-relaxed font-medium text-red-600 ring-1 ring-red-100 ring-inset">
+                <WarningCircle size={14} weight="fill" className="mt-0.5 shrink-0" />
+                {error}
+              </p>
+            )}
+          </Modal>
+
+          {review.current && review.current.status === "review" && (
+            <ReviewRoleDrawer
+              role={review.current.role}
+              fileName={review.current.fileName}
+              index={review.currentIdx}
+              total={review.items.length}
+              saving={savingRole}
+              onChange={(patch) => review.updateCurrent(patch)}
+              onSave={handleSaveRole}
+              onSaveAndNext={handleSaveRoleAndNext}
+              onDiscard={handleDiscardRole}
+              onClose={handleCloseReview}
+              onPrev={() => review.setCurrent(Math.max(0, review.currentIdx - 1))}
+              onNext={() => review.setCurrent(Math.min(review.items.length - 1, review.currentIdx + 1))}
             />
-          </div>
-
-          {error && (
-            <p className="mt-4 flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2.5 text-xs leading-relaxed font-medium text-red-600 ring-1 ring-red-100 ring-inset">
-              <WarningCircle size={14} weight="fill" className="mt-0.5 shrink-0" />
-              {error}
-            </p>
           )}
-        </Modal>
+        </>
       )}
 
       {/* Delete confirmation */}
@@ -378,6 +487,18 @@ export default function RoleDescription() {
           onConfirm={() => void handleConfirmDelete()}
         />
       )}
+
+      {/* Edit role drawer — right slide cabinet */}
+      {editingRole && (
+        <EditRoleDrawer
+          role={editingRole}
+          onClose={() => setEditingRole(null)}
+          onSave={async (updated) => {
+            await updateRole(editingRole.id, updated);
+            await mutateRoles();
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -386,6 +507,7 @@ function RolesTable({
   roles,
   loading,
   onDeleteRequest,
+  onEditRequest,
   onSelectRequest,
   candidates,
   activeCandidate,
@@ -395,6 +517,7 @@ function RolesTable({
   roles: RoleRow[];
   loading: boolean;
   onDeleteRequest: (role: RoleRow) => void;
+  onEditRequest?: (role: RoleRow) => void;
   onSelectRequest: (role: RoleRow) => void;
   candidates: CandidateRow[];
   activeCandidate: CandidateRow | null;
@@ -466,6 +589,7 @@ function RolesTable({
                       column={col}
                       role={role}
                       onDeleteRequest={onDeleteRequest}
+                      onEditRequest={onEditRequest}
                       candidates={candidates}
                       activeCandidate={activeCandidate}
                       match={matches[role.id]}
@@ -486,6 +610,7 @@ function Cell({
   column,
   role,
   onDeleteRequest,
+  onEditRequest,
   candidates,
   activeCandidate,
   match,
@@ -494,6 +619,7 @@ function Cell({
   column: (typeof COLUMNS)[number];
   role: RoleRow;
   onDeleteRequest: (role: RoleRow) => void;
+  onEditRequest?: (role: RoleRow) => void;
   candidates: CandidateRow[];
   activeCandidate: CandidateRow | null;
   match?: MatchResult;
@@ -505,6 +631,7 @@ function Cell({
         <JobCell
           role={role}
           onDeleteRequest={onDeleteRequest}
+          onEditRequest={onEditRequest}
           candidates={candidates}
           activeCandidate={activeCandidate}
           match={match}
@@ -627,6 +754,7 @@ function CandidateProfile({ name, score }: { name: string; score?: number }) {
 function JobCell({
   role,
   onDeleteRequest,
+  onEditRequest,
   candidates,
   activeCandidate,
   match,
@@ -634,6 +762,7 @@ function JobCell({
 }: {
   role: RoleRow;
   onDeleteRequest: (role: RoleRow) => void;
+  onEditRequest?: (role: RoleRow) => void;
   candidates: CandidateRow[];
   activeCandidate: CandidateRow | null;
   match?: MatchResult;
@@ -666,17 +795,32 @@ function JobCell({
         <span className="min-w-0 truncate text-base font-semibold text-gray-900">
           {role.jobTitle}
         </span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDeleteRequest(role);
-          }}
-          className="ml-auto rounded-lg p-1.5 text-gray-300 opacity-0 transition-opacity duration-150 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 focus:opacity-100"
-          aria-label={`Delete ${role.jobTitle}`}
-          title="Delete role"
-        >
-          <Trash size={15} />
-        </button>
+        <span className="ml-auto flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+          {onEditRequest && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onEditRequest(role);
+              }}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+              aria-label={`Edit ${role.jobTitle}`}
+              title="Edit role"
+            >
+              <NotePencil size={15} />
+            </button>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDeleteRequest(role);
+            }}
+            className="rounded-lg p-1.5 text-gray-300 hover:bg-red-50 hover:text-red-500"
+            aria-label={`Delete ${role.jobTitle}`}
+            title="Delete role"
+          >
+            <Trash size={15} />
+          </button>
+        </span>
       </div>
       {role.description && (
         <p className="text-base leading-relaxed text-gray-500">{role.description}</p>

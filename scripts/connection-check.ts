@@ -1,4 +1,20 @@
 import { app } from "../lib/firebase";
+import { getDb, getDbPath } from "../lib/db/connection";
+
+async function testSqliteConnection() {
+  try {
+    const db = getDb();
+    const path = getDbPath();
+    // Simple query - list candidates count
+    const { candidates } = await import("../lib/db/schema");
+    const rows = await db.select().from(candidates).limit(1);
+    console.log(`SQLite connected: ${path} (${rows.length} sample rows)`);
+    return true;
+  } catch (error) {
+    console.error("SQLite connection error:", error);
+    return false;
+  }
+}
 
 async function testFirebaseConnection() {
   try {
@@ -59,4 +75,4 @@ async function testOpenRouterConnection() {
   }
 }
 
-export { testFirebaseConnection, testApiConnection, testOpenRouterConnection };
+export { testFirebaseConnection, testApiConnection, testOpenRouterConnection, testSqliteConnection };

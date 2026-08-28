@@ -1,5 +1,18 @@
 import JSON5 from "json5";
-import { firstSuccess, OpenRouterError, openrouterChat, type ChatCompletion } from "./openrouter";
+import {
+  firstSuccess,
+  OpenRouterError,
+  openrouterChat,
+  tokenUsageFromCompletion,
+  type ChatCompletion,
+  type TokenUsage,
+} from "./openrouter";
+
+export type StructuredResult = {
+  data: Record<string, unknown>;
+  usage: TokenUsage;
+  model: string;
+};
 
 /** Remove reasoning-model "thinking" output that leaks into content. */
 export function stripThinking(text: string): string {
@@ -167,24 +180,31 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+export type RaceResult = {
+  content: string;
+  usage: TokenUsage;
+  model: string;
+};
+
 /**
  * Race the primary model against fallbacks and return the first response
  * whose content actually contains the expected anchor key.
+ * Also propagates token usage from the winning model.
  */
 async function raceStructured(
   messages: Array<{ role: string; content: string }>,
   anchorKey: string,
   model: string
-): Promise<string> {
+): Promise<RaceResult> {
   const models = [...new Set([model, ...RACE_FALLBACKS])];
 
-  const attempt = async (m: string): Promise<string> => {
+  const attempt = async (m: string): Promise<RaceResult> => {
     const opts = { retries: 1, timeoutMs: 45000 };
     // Detailed resumes produce large JSON (long skills/contact arrays);
     // a tight cap truncates the object mid-stream and makes it unparseable.
     const maxTokens = 8192;
 
-    const finish = (data: ChatCompletion): string => {
+    const finish = (data: ChatCompletion, winningModel: string): RaceResult => {
       const choice = data.choices?.[0];
       const content = choice?.message?.content ?? "";
       if (!content.trim()) {
@@ -196,34 +216,35 @@ async function raceStructured(
       if (!hasAnchorKey(content, anchorKey)) {
         throw new OpenRouterError("Model response contained no structured JSON", 502);
       }
-      console.log(`[ai-extract] succeeded via ${m}`);
-      return content;
+      const usage = tokenUsageFromCompletion(data, winningModel);
+      console.log(
+        `[ai-extract] succeeded via ${winningModel} — ${usage.promptTokens} in / ${usage.completionTokens} out / ${usage.totalTokens} total`
+      );
+      return { content, usage, model: data.model || winningModel };
     };
 
     try {
-      return finish(
-        (await openrouterChat(
-          {
-            model: m,
-            messages,
-            max_tokens: maxTokens,
-            temperature: 0.2,
-            response_format: { type: "json_object" },
-          },
-          opts
-        )) as ChatCompletion
-      );
+      const data = (await openrouterChat(
+        {
+          model: m,
+          messages,
+          max_tokens: maxTokens,
+          temperature: 0.2,
+          response_format: { type: "json_object" },
+        },
+        opts
+      )) as ChatCompletion;
+      return finish(data, m);
     } catch (err) {
       const isFormatIssue =
         err instanceof OpenRouterError &&
         /response_format|json_object|not.*support/i.test(err.message);
       if (!isFormatIssue) throw err;
-      return finish(
-        (await openrouterChat(
-          { model: m, messages, max_tokens: maxTokens, temperature: 0.2 },
-          opts
-        )) as ChatCompletion
-      );
+      const data = (await openrouterChat(
+        { model: m, messages, max_tokens: maxTokens, temperature: 0.2 },
+        opts
+      )) as ChatCompletion;
+      return finish(data, m);
     }
   };
 
@@ -232,27 +253,27 @@ async function raceStructured(
 
 /**
  * High-level helper: send text to the model fleet, get back a parsed JSON
- * object anchored on `anchorKey`. Runs the race twice (free-tier providers
- * recover quickly from brief rate limits) before giving up.
+ * object anchored on `anchorKey` plus token usage. Runs the race twice
+ * (free-tier providers recover quickly from brief rate limits) before giving up.
  */
 export async function extractStructured(
   userContent: string,
   systemPrompt: string,
   anchorKey: string,
   model: string
-): Promise<Record<string, unknown>> {
+): Promise<StructuredResult> {
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userContent },
   ];
 
-  let content = "";
+  let race: RaceResult | null = null;
   let lastError: unknown;
 
-  for (let round = 0; round < 2 && !content; round++) {
+  for (let round = 0; round < 2 && !race; round++) {
     if (round > 0) await sleep(RETRY_ROUND_DELAY_MS);
     try {
-      content = await raceStructured(messages, anchorKey, model);
+      race = await raceStructured(messages, anchorKey, model);
     } catch (err) {
       lastError = err;
       console.warn(
@@ -262,13 +283,24 @@ export async function extractStructured(
     }
   }
 
-  if (!content.trim()) {
+  if (!race || !race.content.trim()) {
     throw lastError instanceof Error ? lastError : new Error("Extraction failed");
   }
 
-  const parsed = parseAnchoredObject(content, anchorKey);
+  const parsed = parseAnchoredObject(race.content, anchorKey);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Model did not return valid JSON.");
   }
-  return parsed as Record<string, unknown>;
+  return { data: parsed as Record<string, unknown>, usage: race.usage, model: race.model };
+}
+
+/** Back-compat wrapper: returns only the parsed data (usage discarded). */
+export async function extractStructuredData(
+  userContent: string,
+  systemPrompt: string,
+  anchorKey: string,
+  model: string
+): Promise<Record<string, unknown>> {
+  const { data } = await extractStructured(userContent, systemPrompt, anchorKey, model);
+  return data;
 }

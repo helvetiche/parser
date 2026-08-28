@@ -3,6 +3,7 @@ import { matchFromUnknown, type MatchResult } from "./match-schema";
 import type { Candidate } from "./candidate-schema";
 import type { RoleData } from "./role-schema";
 import { DEFAULT_MODEL } from "./models";
+import type { TokenUsage } from "./openrouter";
 
 export const MATCH_MODEL = DEFAULT_MODEL;
 
@@ -30,6 +31,12 @@ function buildSystemMessage(instructions: string): string {
   return `${instructions}\n\n${RESPONSE_CONTRACT}`;
 }
 
+export type MatchWithUsage = {
+  match: MatchResult;
+  usage: TokenUsage;
+  model: string;
+};
+
 /**
  * Compare a candidate against a role with the model fleet and return a
  * structured fit assessment (score, skill overlap, qualification notes).
@@ -42,8 +49,23 @@ export async function matchCandidateToRole(
   model: string = MATCH_MODEL,
   instructions: string = DEFAULT_MATCH_INSTRUCTIONS
 ): Promise<MatchResult> {
+  const { match } = await matchCandidateToRoleWithUsage(candidate, role, model, instructions);
+  return match;
+}
+
+export async function matchCandidateToRoleWithUsage(
+  candidate: Candidate,
+  role: RoleData,
+  model: string = MATCH_MODEL,
+  instructions: string = DEFAULT_MATCH_INSTRUCTIONS
+): Promise<MatchWithUsage> {
   const payload = JSON.stringify({ candidate, role });
 
-  const parsed = await extractStructured(payload, buildSystemMessage(instructions), "score", model);
-  return matchFromUnknown(parsed);
+  const { data, usage, model: usedModel } = await extractStructured(
+    payload,
+    buildSystemMessage(instructions),
+    "score",
+    model
+  );
+  return { match: matchFromUnknown(data), usage, model: usedModel };
 }

@@ -6,8 +6,12 @@ import {
   listRoles,
   saveRoleEvaluation,
 } from "@/lib/firestore-server";
-import { DEFAULT_MATCH_INSTRUCTIONS, matchCandidateToRole } from "@/lib/match-role";
+import {
+  DEFAULT_MATCH_INSTRUCTIONS,
+  matchCandidateToRoleWithUsage,
+} from "@/lib/match-role";
 import type { MatchResult } from "@/lib/match-schema";
+import type { TokenUsage } from "@/lib/openrouter";
 
 /** How many role-matching LLM calls run at once; free tiers rate-limit hard. */
 const MAX_CONCURRENCY = 4;
@@ -16,6 +20,8 @@ export type RoleMatch = {
   roleId: string;
   match?: MatchResult;
   error?: string;
+  usage?: TokenUsage;
+  model?: string;
 };
 
 /**
@@ -58,7 +64,7 @@ export async function POST(req: NextRequest) {
       MAX_CONCURRENCY,
       async (role): Promise<RoleMatch> => {
         try {
-          const match = await matchCandidateToRole(
+          const { match, usage, model: usedModel } = await matchCandidateToRoleWithUsage(
             candidate,
             role,
             model,
@@ -74,7 +80,7 @@ export async function POST(req: NextRequest) {
           } catch {
             // Persisting is best-effort; never sink the match response.
           }
-          return { roleId: role.id, match };
+          return { roleId: role.id, match, usage, model: usedModel };
         } catch (error) {
           return {
             roleId: role.id,

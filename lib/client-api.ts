@@ -2,6 +2,7 @@ import type { Candidate, CandidateRow } from "./candidate-schema";
 import type { RoleData, RoleRow } from "./role-schema";
 import type { MatchResult } from "./match-schema";
 import type { PromptData, PromptRow } from "./prompt-schema";
+import type { TokenUsage } from "./openrouter";
 import { getIdToken } from "./auth";
 
 /** GET payload of /api/candidates */
@@ -15,7 +16,19 @@ export type PromptsResponse = { prompts: PromptRow[] };
 
 /** POST payload of /api/match */
 export type MatchResponse = {
-  results: Array<{ roleId: string; match?: MatchResult; error?: string }>;
+  results: Array<{ roleId: string; match?: MatchResult; error?: string; usage?: TokenUsage; model?: string }>;
+};
+
+export type ExtractCandidateResponse = {
+  candidate: Candidate;
+  usage?: TokenUsage;
+  model?: string;
+};
+
+export type ChatResponse = {
+  result: string;
+  usage?: TokenUsage;
+  model?: string;
 };
 
 /**
@@ -59,6 +72,14 @@ export async function parsePdfFile(file: File): Promise<string> {
 }
 
 export async function extractCandidateFromText(text: string, model: string): Promise<Candidate> {
+  const { candidate } = await extractCandidateFromTextWithUsage(text, model);
+  return candidate;
+}
+
+export async function extractCandidateFromTextWithUsage(
+  text: string,
+  model: string
+): Promise<ExtractCandidateResponse> {
   const res = await authedFetch("/api/extract-candidates", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -66,10 +87,22 @@ export async function extractCandidateFromText(text: string, model: string): Pro
   });
   const data = await res.json();
   if (!res.ok) throw new Error(await errorFrom(res, "Failed to extract candidate"));
-  return data.candidate as Candidate;
+  return {
+    candidate: data.candidate as Candidate,
+    usage: data.usage as TokenUsage | undefined,
+    model: data.model as string | undefined,
+  };
 }
 
 export async function extractRoleFromText(text: string, model?: string): Promise<RoleData> {
+  const { role } = await extractRoleFromTextWithUsage(text, model);
+  return role;
+}
+
+export async function extractRoleFromTextWithUsage(
+  text: string,
+  model?: string
+): Promise<{ role: RoleData; usage?: TokenUsage; model?: string }> {
   const res = await authedFetch("/api/extract-role", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -77,7 +110,11 @@ export async function extractRoleFromText(text: string, model?: string): Promise
   });
   const data = await res.json();
   if (!res.ok) throw new Error(await errorFrom(res, "Failed to extract role"));
-  return data.role as RoleData;
+  return {
+    role: data.role as RoleData,
+    usage: data.usage as TokenUsage | undefined,
+    model: data.model as string | undefined,
+  };
 }
 
 export async function matchCandidateToRoles(
@@ -129,6 +166,15 @@ export async function sendChatMessage(
   model: string,
   context?: string
 ): Promise<string> {
+  const { result } = await sendChatMessageWithUsage(messages, model, context);
+  return result;
+}
+
+export async function sendChatMessageWithUsage(
+  messages: Array<{ role: string; content: string }>,
+  model: string,
+  context?: string
+): Promise<ChatResponse> {
   const res = await authedFetch("/api/chat", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -136,7 +182,11 @@ export async function sendChatMessage(
   });
   const data = await res.json();
   if (!res.ok) throw new Error(await errorFrom(res, "Request failed"));
-  return data.result as string;
+  return {
+    result: data.result as string,
+    usage: data.usage as TokenUsage | undefined,
+    model: data.model as string | undefined,
+  };
 }
 
 /* ---------------- Candidates mutations ---------------- */
@@ -160,6 +210,17 @@ export async function deleteCandidate(id: string): Promise<void> {
     throw new Error(await errorFrom(res, "Failed to delete candidate"));
 }
 
+export async function updateCandidate(id: string, candidate: Candidate): Promise<CandidateRow> {
+  const res = await authedFetch(`/api/candidates/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ candidate }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to update candidate"));
+  const data = await res.json();
+  return data.candidate as CandidateRow;
+}
+
 /* ---------------- Roles mutations ---------------- */
 
 export async function createRole(role: RoleData): Promise<RoleRow> {
@@ -178,6 +239,17 @@ export async function deleteRole(id: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok && res.status !== 204) throw new Error(await errorFrom(res, "Failed to delete role"));
+}
+
+export async function updateRole(id: string, role: RoleData): Promise<RoleRow> {
+  const res = await authedFetch(`/api/roles/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new Error(await errorFrom(res, "Failed to update role"));
+  const data = await res.json();
+  return data.role as RoleRow;
 }
 
 /** Upserts a submitted candidate (endorsement) on a role. */

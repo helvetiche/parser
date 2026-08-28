@@ -35,6 +35,19 @@ export async function PUT(req: NextRequest, ctx: RouteContext<"/api/roles/[id]">
   try {
     const body = await req.json().catch(() => ({}));
 
+    // Generic role edit — update title/description/responsibilities/requirements/skills
+    if (body?.role && typeof body.role === "object") {
+      const { updateRole } = await import("@/lib/firestore-server");
+      const role = await updateRole(id, body.role);
+      return NextResponse.json({ role });
+    }
+    // Back-compat: bare object with jobTitle is also a role edit
+    if (body && typeof body === "object" && typeof (body as Record<string, unknown>).jobTitle === "string" && !body.endorsement && !body.removeEndorsement) {
+      const { updateRole } = await import("@/lib/firestore-server");
+      const role = await updateRole(id, body);
+      return NextResponse.json({ role });
+    }
+
     // Upsert a submitted candidate (endorsement) on the role.
     if (body?.endorsement && typeof body.endorsement === "object") {
       const e = body.endorsement as Record<string, unknown>;

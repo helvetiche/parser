@@ -9,8 +9,16 @@ import {
   scrapeCandidates,
   scrapeSinglePage,
 } from "@/lib/hunt/automation";
+import {
+  extractCandidateProfileHeadless,
+  scrapeCandidatesHeadless,
+  scrapeSinglePageHeadless,
+} from "@/lib/hunt/headless";
 import { listRoles } from "@/lib/firestore-server";
-import { DEFAULT_MATCH_INSTRUCTIONS, matchCandidateToRole } from "@/lib/match-role";
+import {
+  DEFAULT_MATCH_INSTRUCTIONS,
+  matchCandidateToRoleWithUsage,
+} from "@/lib/match-role";
 import type { Candidate } from "@/lib/candidate-schema";
 
 export async function POST(req: NextRequest) {
@@ -20,8 +28,12 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}));
 
+    const isHeadless = body?.headless === true;
+
     // STEP 1 — Open tab (bring chosen sourcing tab to foreground).
+    // In headless mode this is a no-op (headless nav does goto directly).
     if (typeof body?.open === "string" && body.open) {
+      if (isHeadless) return NextResponse.json({ ok: true, title: "", url: body.open, headless: true });
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
       const result = await focusBrowserTab(body.open, endpoint);
       return NextResponse.json(result);
@@ -29,6 +41,7 @@ export async function POST(req: NextRequest) {
 
     // STEP 2 — Scrape all candidate names + pagination (legacy fused).
     // Accepts optional maxPages (1..50) and maxCandidates (1..500) to bound traversal.
+    // In headless mode runs entirely in an invisible browser (cookie-synced via CDP).
     if (typeof body?.scrape === "string" && body.scrape) {
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
       const maxPages =
@@ -42,7 +55,9 @@ export async function POST(req: NextRequest) {
       const opts: { maxPages?: number; maxCandidates?: number } = {};
       if (maxPages !== undefined) opts.maxPages = maxPages;
       if (maxCandidates !== undefined) opts.maxCandidates = maxCandidates;
-      const result = await scrapeCandidates(body.scrape, endpoint, opts);
+      const result = isHeadless
+        ? await scrapeCandidatesHeadless(body.scrape, endpoint, opts)
+        : await scrapeCandidates(body.scrape, endpoint, opts);
       return NextResponse.json(result);
     }
 
@@ -56,13 +71,18 @@ export async function POST(req: NextRequest) {
           : typeof body?.maxCandidates === "number" && Number.isFinite(body.maxCandidates)
             ? Math.max(1, Math.min(Math.floor(body.maxCandidates), 500))
             : undefined;
-      const result = await scrapeSinglePage(body.scrapePage, endpoint, maxPerPage ?? 25);
+      const result = isHeadless
+        ? await scrapeSinglePageHeadless(body.scrapePage, endpoint, maxPerPage ?? 25)
+        : await scrapeSinglePage(body.scrapePage, endpoint, maxPerPage ?? 25);
       return NextResponse.json(result);
     }
 
     // STEP 3 — Scrap pagination (new): move to next page when Step 2 is done.
     // Returns {moved, hasMore} so the orchestrator can loop until limit reached.
+    // In headless this is handled inside scrapeCandidatesHeadless in one call;
+    // this endpoint is kept for non-headless orchestrator compatibility.
     if (typeof body?.nextPage === "string" && body.nextPage) {
+      if (isHeadless) return NextResponse.json({ moved: false, hasMore: false, url: body.nextPage, reason: "headless-combined" });
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
       const result = await goToNextPage(body.nextPage, endpoint);
       return NextResponse.json(result);
@@ -73,9 +93,12 @@ export async function POST(req: NextRequest) {
     // scraped, then guaranteed closed before the next candidate is processed.
     // The route is called once per candidate; batching + close guarantees are
     // enforced server-side in extractCandidateProfile (lib/hunt/automation.ts:extractCandidateProfile).
+    // In headless mode the tab is never visible in the user's browser.
     if (typeof body?.extract === "string" && body.extract) {
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
-      const result = await extractCandidateProfile(body.extract, endpoint);
+      const result = isHeadless
+        ? await extractCandidateProfileHeadless(body.extract, endpoint)
+        : await extractCandidateProfile(body.extract, endpoint);
       return NextResponse.json(result);
     }
 
@@ -83,7 +106,9 @@ export async function POST(req: NextRequest) {
     // Called after matching completes; navigates the sourcing tab back to the
     // initial list URL so the recruiter isn't left on the last pagination page.
     // Respects the pages slider: if 3 pages were scraped, we still return to page 1.
+    // No-op in headless (nothing visible to return to).
     if (typeof body?.returnToScrape === "string" && body.returnToScrape) {
+      if (isHeadless) return NextResponse.json({ ok: true, url: body.returnToScrape, headless: true });
       const endpoint = typeof body?.endpoint === "string" ? body.endpoint : undefined;
       const result = await returnToScrapePage(body.returnToScrape, endpoint);
       return NextResponse.json(result);
@@ -93,6 +118,7 @@ export async function POST(req: NextRequest) {
     // Batch match runs *after* STEP 6 (AI parse of all raws) completes, so
     // no scraping state is held during LLM calls. The candidate is NOT written
     // to the DB — only the computed MatchResult is returned.
+    // Returns { match, usage, model } so the pipeline can display token consumption.
     if (body?.match && typeof body.match === "object") {
       const { candidate, roleId } = body.match as { candidate?: unknown; roleId?: string };
       if (!candidate || !roleId) {
@@ -103,13 +129,13 @@ export async function POST(req: NextRequest) {
       if (!role) {
         return NextResponse.json({ error: "Role not found" }, { status: 404 });
       }
-      const match = await matchCandidateToRole(
+      const { match, usage, model } = await matchCandidateToRoleWithUsage(
         candidate as Candidate,
         role,
         undefined,
         DEFAULT_MATCH_INSTRUCTIONS
       );
-      return NextResponse.json({ match });
+      return NextResponse.json({ match, usage, model });
     }
 
     // Default: list the user's sourcing tabs.

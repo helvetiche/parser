@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { chat } from "@/lib/chat";
+import { chatWithUsage } from "@/lib/chat";
 import { requireUser } from "@/lib/auth-server";
 
 export async function POST(req: NextRequest) {
@@ -8,8 +8,8 @@ export async function POST(req: NextRequest) {
 
   try {
     const { messages, model, context } = await req.json();
-    const response = await chat(messages, model, context);
-    return NextResponse.json({ result: response });
+    const { result, usage, model: usedModel } = await chatWithUsage(messages, model, context);
+    return NextResponse.json({ result, usage, model: usedModel });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Unknown error" },

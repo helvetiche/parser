@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { extractRole, ROLE_MODEL } from "@/lib/extract-role";
+import { extractRoleWithUsage, ROLE_MODEL } from "@/lib/extract-role";
 import { isReadableText } from "@/lib/text-quality";
 import { requireUser } from "@/lib/auth-server";
 
@@ -26,8 +26,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const role = await extractRole(text, selectedModel);
-    return NextResponse.json({ role });
+    const { role, usage, model: usedModel } = await extractRoleWithUsage(text, selectedModel);
+    return NextResponse.json({ role, usage, model: usedModel });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Extraction failed" },

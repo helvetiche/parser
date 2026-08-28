@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { extractCandidate, PARSER_MODEL } from "@/lib/extract-candidate";
+import { extractCandidateWithUsage, PARSER_MODEL } from "@/lib/extract-candidate";
 import { isReadableText } from "@/lib/text-quality";
 import { requireUser } from "@/lib/auth-server";
 
@@ -26,8 +26,11 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const candidate = await extractCandidate(text, selectedModel);
-    return NextResponse.json({ candidate });
+    const { candidate, usage, model: usedModel } = await extractCandidateWithUsage(
+      text,
+      selectedModel
+    );
+    return NextResponse.json({ candidate, usage, model: usedModel });
   } catch (error) {
     return NextResponse.json(
       { error: error instanceof Error ? error.message : "Extraction failed" },

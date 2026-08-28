@@ -36,6 +36,14 @@ yarn-error.log*
 # vercel
 .vercel
 
+# sqlite
+*.db
+*.sqlite
+*.sqlite3
+/data/
+# drizzle migrations are committed, only ignore cache
+/drizzle/.cache/
+
 # typescript
 *.tsbuildinfo
 next-env.d.ts

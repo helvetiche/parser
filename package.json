@@ -7,11 +7,19 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "create-user": "node --env-file=.env scripts/create-user.mjs"
+    "create-user": "node --env-file=.env scripts/create-user.mjs",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "drizzle-kit migrate",
+    "db:push": "drizzle-kit push",
+    "db:studio": "drizzle-kit studio",
+    "db:migrate:firestore": "node --env-file=.env --import tsx scripts/migrate-firestore-to-sqlite.ts",
+    "db:migrate:firestore:dry": "node --env-file=.env --import tsx scripts/migrate-firestore-to-sqlite.ts --dry-run"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
     "@playwright/test": "^1.62.1",
+    "better-sqlite3": "^13.0.3",
+    "drizzle-orm": "^0.45.2",
     "firebase": "^12.18.0",
     "firebase-admin": "^14.3.0",
     "json5": "^2.2.3",
@@ -31,14 +39,17 @@
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
+    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.3.1",
     "prettier": "3.9.6",
     "prettier-plugin-tailwindcss": "0.8.1",
     "tailwindcss": "^4",
+    "tsx": "^4.23.12",
     "typescript": "^5"
   }
 }

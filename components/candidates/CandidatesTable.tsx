@@ -11,6 +11,7 @@ import {
   GraduationCap,
   Lightning,
   Link as LinkIcon,
+  NotePencil,
   Phone,
   Trash,
   Tray,
@@ -103,10 +104,12 @@ function ExperienceCell({ experience }: { experience: string[] }) {
 function NameCell({
   candidate,
   onDelete,
+  onEdit,
   matchScore,
 }: {
   candidate: CandidateRow;
   onDelete: (candidate: CandidateRow) => void;
+  onEdit?: (candidate: CandidateRow) => void;
   matchScore?: number;
 }) {
   return (
@@ -116,17 +119,32 @@ function NameCell({
           {getInitials(candidate.fullName)}
         </span>
         <span className="text-base font-semibold text-gray-900">{candidate.fullName}</span>
-        <button
-          onClick={(e) => {
-            e.stopPropagation();
-            onDelete(candidate);
-          }}
-          className="ml-auto rounded-lg p-1.5 text-gray-300 opacity-0 transition-opacity duration-150 group-hover:opacity-100 hover:bg-red-50 hover:text-red-500 focus:opacity-100"
-          aria-label={`Delete ${candidate.fullName}`}
-          title="Delete candidate"
-        >
-          <Trash size={15} />
-        </button>
+        <span className="ml-auto flex items-center gap-1 opacity-0 transition-opacity duration-150 group-hover:opacity-100 focus-within:opacity-100">
+          {onEdit && (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onEdit(candidate);
+              }}
+              className="rounded-lg p-1.5 text-gray-400 hover:bg-gray-100 hover:text-gray-700"
+              aria-label={`Edit ${candidate.fullName}`}
+              title="Edit candidate"
+            >
+              <NotePencil size={15} />
+            </button>
+          )}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(candidate);
+            }}
+            className="rounded-lg p-1.5 text-gray-300 hover:bg-red-50 hover:text-red-500"
+            aria-label={`Delete ${candidate.fullName}`}
+            title="Delete candidate"
+          >
+            <Trash size={15} />
+          </button>
+        </span>
       </div>
       {typeof matchScore === "number" && (
         <div className="flex items-center gap-2">
@@ -166,6 +184,7 @@ type CandidatesTableProps = {
   candidates: CandidateRow[];
   loading: boolean;
   onDeleteRequest: (candidate: CandidateRow) => void;
+  onEditRequest?: (candidate: CandidateRow) => void;
   /** Optional actions rendered on the right side of the search toolbar. */
   actions?: React.ReactNode;
   /** Optional extra controls (e.g. limit sliders) rendered in the same search toolbar row. */
@@ -185,6 +204,7 @@ export default function CandidatesTable({
   candidates,
   loading,
   onDeleteRequest,
+  onEditRequest,
   actions,
   toolbarExtra,
   selectable = false,
@@ -233,9 +253,9 @@ export default function CandidatesTable({
   // Show match-rate filter only when scores exist (Hunt Automation)
   const hasScores = !!matchScores && Object.keys(matchScores).length > 0;
 
-  return (
+    return (
     <div className="overflow-hidden rounded-2xl border border-gray-200/80 bg-white/80 shadow-sm backdrop-blur">
-      {/* Search toolbar — search + filter (close together) + limit sliders + actions */}
+      {/* Search toolbar — search + filter close together, actions right */}
       <div className="flex flex-wrap items-center gap-3 border-b border-gray-100 px-4 py-3">
         <div className="flex min-w-[280px] flex-1 items-center gap-2">
           <div className="min-w-[180px] flex-1">
@@ -337,7 +357,7 @@ export default function CandidatesTable({
                       ci > 0 || selectable ? "border-l border-gray-100" : ""
                     }`}
                   >
-                    {renderCell(col.key, c, onDeleteRequest, matchScores)}
+                    {renderCell(col.key, c, onDeleteRequest, matchScores, onEditRequest)}
                   </td>
                 ))}
               </tr>
@@ -361,13 +381,15 @@ function renderCell(
   key: ColumnKey,
   candidate: CandidateRow,
   onDelete: (candidate: CandidateRow) => void,
-  matchScores?: Record<string, number>
+  matchScores?: Record<string, number>,
+  onEdit?: (candidate: CandidateRow) => void
 ) {
   if (key === "fullName")
     return (
       <NameCell
         candidate={candidate}
         onDelete={onDelete}
+        onEdit={onEdit}
         matchScore={matchScores?.[candidate.id]}
       />
     );

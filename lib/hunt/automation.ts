@@ -1,4 +1,5 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { DuplicateManager } from "./duplicate-manager";
 
 export type BrowserTab = {
   index: number;
@@ -155,6 +156,8 @@ export type ScrapeCandidatesResult = {
     inAnchors: number;
     pagesScraped: number;
     hasMorePages: boolean;
+    duplicatesFiltered?: number;
+    uniqueCount?: number;
   };
 };
 
@@ -257,13 +260,14 @@ export async function scrapeCandidates(
       /linkedin\.com\/recruiter/i.test(matchedUrl) ||
       (await page.$('a[href*="/talent/profile/"], a[href*="/recruiter/profile/"]')) !== null;
 
-    // Accumulate across paginated pages.
-    const seenUrls = new Set<string>();
+    // Accumulate across paginated pages — now via DuplicateManager (host+path normalized, query/hash/trailing slash agnostic)
+    const dupManager = new DuplicateManager();
     const aggregated: ScrapedCandidate[] = [];
     let lastTotalAnchors = 0;
     let lastInAnchors = 0;
     let pagesScraped = 0;
     let hasMorePages = false;
+    let totalDuplicatesFiltered = 0;
 
     const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -293,6 +297,14 @@ export async function scrapeCandidates(
 
         const all = Array.from(document.querySelectorAll<HTMLAnchorElement>(sel));
         const seen = new Set<string>();
+        const norm = (u: string) => {
+          try {
+            const x = new URL(u);
+            return (x.hostname.replace(/^www\./i, "") + x.pathname.replace(/\/+$/, "")).toLowerCase();
+          } catch {
+            return u.replace(/^https?:\/\/(www\.)?/i, "").split("?")[0].split("#")[0].replace(/\/+$/, "").toLowerCase();
+          }
+        };
         const out: { name: string; url: string }[] = [];
 
         for (const a of all) {
@@ -303,8 +315,9 @@ export async function scrapeCandidates(
           const url = match[0];
           // Skip the Recruiter home / search root — those are not candidate profiles.
           if (/\/(recruiter|talent)\/?($|\?|#)/i.test(url)) continue;
-          if (seen.has(url)) continue;
-          seen.add(url);
+          const k = norm(url);
+          if (seen.has(k)) continue;
+          seen.add(k);
 
           // Name hunt: aria-label → visible text → nearest labelled parent.
           // Recruiter cards often expose "View profile for <Name>" in aria-label.
@@ -343,8 +356,10 @@ export async function scrapeCandidates(
           const generic = Array.from(document.querySelectorAll<HTMLAnchorElement>(genericSel));
           for (const a of generic) {
             const url = a.href.split("?")[0].split("#")[0];
-            if (!url || seen.has(url)) continue;
-            seen.add(url);
+            if (!url) continue;
+            const k = norm(url);
+            if (seen.has(k)) continue;
+            seen.add(k);
             const name = (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim() || url;
             out.push({ name, url });
           }
@@ -366,12 +381,9 @@ export async function scrapeCandidates(
       // e.g. 5 per page × 3 pages = 15 total. Unlimited per-page (≥500) = no slice.
       const perPageSlice =
         maxPerPage >= 500 ? data.candidates : data.candidates.slice(0, maxPerPage);
-      for (const c of perPageSlice) {
-        if (!seenUrls.has(c.url)) {
-          seenUrls.add(c.url);
-          aggregated.push(c);
-        }
-      }
+      const { unique, duplicateCount } = dupManager.filter(perPageSlice as { url: string }[]);
+      totalDuplicatesFiltered += duplicateCount;
+      aggregated.push(...(unique as ScrapedCandidate[]));
 
       // --- 3) loop until limit is reached ---
       // Total limit = perPage * pages (when both finite). If aggregated has hit
@@ -550,6 +562,8 @@ export async function scrapeCandidates(
         inAnchors: lastInAnchors,
         pagesScraped,
         hasMorePages,
+        duplicatesFiltered: totalDuplicatesFiltered,
+        uniqueCount: aggregated.length,
       },
     };
   } finally {
@@ -650,6 +664,14 @@ export async function scrapeSinglePage(
       }
       const all = Array.from(document.querySelectorAll<HTMLAnchorElement>(sel));
       const seen = new Set<string>();
+      const norm = (u: string) => {
+        try {
+          const x = new URL(u);
+          return (x.hostname.replace(/^www\./i, "") + x.pathname.replace(/\/+$/, "")).toLowerCase();
+        } catch {
+          return u.replace(/^https?:\/\/(www\.)?/i, "").split("?")[0].split("#")[0].replace(/\/+$/, "").toLowerCase();
+        }
+      };
       const out: { name: string; url: string }[] = [];
       for (const a of all) {
         const match = a.href.match(
@@ -658,8 +680,9 @@ export async function scrapeSinglePage(
         if (!match) continue;
         const url = match[0];
         if (/\/(recruiter|talent)\/?($|\?|#)/i.test(url)) continue;
-        if (seen.has(url)) continue;
-        seen.add(url);
+        const k = norm(url);
+        if (seen.has(k)) continue;
+        seen.add(k);
         let name = (a.getAttribute("aria-label") || "").replace(/\s+/g, " ").trim();
         name = name.replace(/^View\s+profile\s+for\s+/i, "").trim();
         if (!name) name = (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim();
@@ -686,8 +709,10 @@ export async function scrapeSinglePage(
         const generic = Array.from(document.querySelectorAll<HTMLAnchorElement>(genericSel));
         for (const a of generic) {
           const url = a.href.split("?")[0].split("#")[0];
-          if (!url || seen.has(url)) continue;
-          seen.add(url);
+          if (!url) continue;
+          const k = norm(url);
+          if (seen.has(k)) continue;
+          seen.add(k);
           const name = (a.innerText || a.textContent || "").replace(/\s+/g, " ").trim() || url;
           out.push({ name, url });
         }
